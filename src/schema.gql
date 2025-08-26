@@ -1,0 +1,96 @@
+# ------------------------------------------------------
+# THIS FILE WAS AUTOMATICALLY GENERATED (DO NOT MODIFY)
+# ------------------------------------------------------
+
+type Users {
+  id: ID!
+  firstname: String
+  lastname: String
+  dni: String
+  email: String!
+  phone: String
+  isActive: Boolean
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  createdBy: Users!
+  updatedBy: Users
+}
+
+"""
+A date-time string at UTC, such as 2007-12-03T10:15:30Z, compliant with the `date-time` format outlined in section 5.6 of the RFC 3339 profile of the ISO 8601 standard for representation of dates and times using the Gregorian calendar.
+"""
+scalar DateTime
+
+type Banks {
+  id: ID!
+  name: String!
+  bankAccount: [BankAccount!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  createdBy: Users!
+  updatedBy: Users
+}
+
+type BankAccount {
+  id: ID!
+  name: String!
+  bankAccountType: BankAccountType!
+  bank: Banks!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  createdBy: Users!
+  updatedBy: Users
+}
+
+type BankAccountType {
+  id: ID!
+  name: String!
+  bankAccount: [BankAccount!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  createdBy: Users!
+  updatedBy: Users
+}
+
+type ExpenseType {
+  id: ID!
+  name: String!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  createdBy: Users!
+  updatedBy: Users
+}
+
+type PaymentMethodTypes {
+  id: ID!
+  name: String!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  createdBy: Users!
+  updatedBy: Users
+}
+
+type PaymentMethod {
+  id: ID!
+  name: String!
+  description: String
+  bankAccount: BankAccount!
+  paymentMethodType: PaymentMethodTypes!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  createdBy: Users!
+  updatedBy: Users
+}
+
+type IncomeType {
+  id: ID!
+  name: String!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  createdBy: Users!
+  updatedBy: Users
+}
+
+type Query {
+  sayHello: String!
+}
