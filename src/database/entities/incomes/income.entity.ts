@@ -1,9 +1,9 @@
 import { Users } from '../users/users.entity';
-import { Field, ID, ObjectType } from '@nestjs/graphql';
-import { GraphQLDateTime } from 'graphql-scalars';
+import { Field, ID, Int, ObjectType } from '@nestjs/graphql';
+import { GraphQLDate, GraphQLDateTime } from 'graphql-scalars';
 import { Column, CreateDateColumn, Entity, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 import { IncomeType } from './income-type.entity';
-import { PaymentMethod } from '../payment-methods/payment-method.entity';
+import { BankAccount } from '../banks/bank-account.entity';
 
 @Entity()
 @ObjectType()
@@ -16,9 +16,21 @@ export class Income {
   @Field(() => String)
   name: string;
 
-  @ManyToOne(() => PaymentMethod)
-  @Field(() => PaymentMethod)
-  paymentMethod: PaymentMethod;
+  @Column('varchar', { nullable: true })
+  @Field(() => String, { nullable: true })
+  description: string | null;
+
+  @Column({ type: 'integer' })
+  @Field(() => Int)
+  amount: number;
+
+  @CreateDateColumn({ type: 'date' })
+  @Field(() => GraphQLDate)
+  date: Date;
+
+  @ManyToOne(() => BankAccount)
+  @Field(() => BankAccount)
+  bankAccount: BankAccount;
 
   @ManyToOne(() => IncomeType)
   @Field(() => IncomeType)
@@ -33,7 +45,7 @@ export class Income {
   updatedAt: Date;
 
   @Column({ type: 'uuid' })
-  paymentMethodId: string;
+  bankAccountId: string;
 
   @Column({ type: 'uuid' })
   incomeTypeId: string;
