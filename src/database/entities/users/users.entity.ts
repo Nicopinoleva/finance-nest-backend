@@ -50,8 +50,8 @@ export class Users {
   updatedBy: Users | null;
 
   @Column({ type: 'uuid', nullable: true })
-  createdById: string;
+  createdById: string | null;
 
   @Column({ type: 'uuid', nullable: true })
-  updatedById: string;
+  updatedById: string | null;
 }
