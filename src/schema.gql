@@ -12,7 +12,7 @@ type Users {
   isActive: Boolean
   createdAt: DateTime!
   updatedAt: DateTime!
-  createdBy: Users!
+  createdBy: Users
   updatedBy: Users
 }
 
@@ -94,3 +94,32 @@ type IncomeType {
 type Query {
   sayHello: String!
 }
+
+type Mutation {
+  createIncome(input: CreateIncomeInput!): String!
+}
+
+input CreateIncomeInput {
+  """Nombre ingreso"""
+  name: String!
+
+  """Descripción"""
+  description: String
+
+  """Monto"""
+  amount: Float!
+
+  """Fecha"""
+  date: Date!
+
+  """Tipo de ingreso"""
+  incomeTypeId: ID!
+
+  """Cuenta"""
+  bankAccountId: ID!
+}
+
+"""
+A date string, such as 2007-12-03, compliant with the `full-date` format outlined in section 5.6 of the RFC 3339 profile of the ISO 8601 standard for representation of dates and times using the Gregorian calendar.
+"""
+scalar Date

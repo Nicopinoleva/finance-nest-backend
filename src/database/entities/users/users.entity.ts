@@ -41,17 +41,17 @@ export class Users {
   @Field(() => GraphQLDateTime)
   updatedAt: Date;
 
-  @ManyToOne(() => Users)
-  @Field(() => Users)
-  createdBy: Users;
+  @ManyToOne(() => Users, { nullable: true })
+  @Field(() => Users, { nullable: true })
+  createdBy: Users | null;
 
   @ManyToOne(() => Users, { nullable: true })
   @Field(() => Users, { nullable: true })
-  updatedBy: Users;
+  updatedBy: Users | null;
 
   @Column({ type: 'uuid', nullable: true })
-  createdById: string;
+  createdById: string | null;
 
   @Column({ type: 'uuid', nullable: true })
-  updatedById: string;
+  updatedById: string | null;
 }
