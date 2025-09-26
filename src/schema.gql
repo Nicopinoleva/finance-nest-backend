@@ -91,8 +91,27 @@ type IncomeType {
   updatedBy: Users
 }
 
+type EmailAttachment {
+  filename: String!
+  contentType: String!
+  size: Int!
+}
+
+type EmailMessage {
+  id: ID!
+  from: String!
+  to: String!
+  subject: String!
+  date: DateTime!
+  text: String!
+  html: String!
+  attachments: [EmailAttachment!]!
+}
+
 type Query {
   sayHello: String!
+  readEmails: [EmailMessage!]!
+  searchEmails(searchCriteria: [[String!]!]!): [EmailMessage!]!
 }
 
 type Mutation {

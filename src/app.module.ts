@@ -17,6 +17,7 @@ import { ExpensesDescriptionsModule } from './modules/expenses/expenses-descript
 import { IncomeTypesModule } from './modules/incomes/income-types/income-types.module';
 import { IncomesModule } from './modules/incomes/incomes/incomes.module';
 import { getDatabaseConfig } from './database/database.config';
+import { EmailModule } from './modules/email/email.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { getDatabaseConfig } from './database/database.config';
     ExpensesDescriptionsModule,
     IncomeTypesModule,
     IncomesModule,
+    EmailModule,
   ],
   controllers: [],
   providers: [],
