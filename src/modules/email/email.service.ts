@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import * as Imap from 'imap';
+import Imap from 'imap';
 import { EmailMessage } from './email.interface';
 import { simpleParser, ParsedMail } from 'mailparser';
 import { Readable } from 'stream';
@@ -252,7 +252,7 @@ export class EmailService {
     const transactionRegex =
       /compra por\s+([A-Z$]+)([\d,\.]+)\s+con Tarjeta de Crédito\s+\*{4}(\d{4})\s+en.*?el\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}:\d{2})/i;
 
-    const match = text.match(transactionRegex);
+    const match = transactionRegex.exec(text);
 
     if (!match) {
       return null;

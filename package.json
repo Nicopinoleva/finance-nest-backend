@@ -32,7 +32,9 @@
     "@nestjs/config": "^4.0.1",
     "@nestjs/core": "^11.0.11",
     "@nestjs/graphql": "^13.0.3",
-    "@nestjs/platform-express": "^11.0.11",
+    "@nestjs/mapped-types": "*",
+    "@nestjs/platform-express": "^11.1.6",
+    "@nestjs/swagger": "^11.2.0",
     "@nestjs/typeorm": "^11.0.0",
     "@types/imap": "^0.8.42",
     "class-transformer": "^0.5.1",
@@ -41,9 +43,9 @@
     "graphql-scalars": "^1.24.1",
     "imap": "^0.8.19",
     "mailparser": "^3.7.4",
-    "pg": "^8.13.3",
-    "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.2"
+    "pdf-lib": "^1.17.1",
+    "pdf-parse-new": "^1.4.1",
+    "pg": "^8.13.3"
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.5",
@@ -52,7 +54,9 @@
     "@types/express": "^5.0.0",
     "@types/jest": "^29.5.14",
     "@types/mailparser": "^3.4.6",
+    "@types/multer": "^2.0.0",
     "@types/node": "^22.13.10",
+    "@types/pdfjs-dist": "^2.10.377",
     "@types/supertest": "^6.0.2",
     "@typescript-eslint/eslint-plugin": "^8.26.0",
     "@typescript-eslint/parser": "^8.26.0",
