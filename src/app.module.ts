@@ -18,6 +18,7 @@ import { IncomeTypesModule } from './modules/incomes/income-types/income-types.m
 import { IncomesModule } from './modules/incomes/incomes/incomes.module';
 import { getDatabaseConfig } from './database/database.config';
 import { EmailModule } from './modules/email/email.module';
+import { CreditCardStatementModule } from './modules/credit-card-statement/credit-card-statement.module';
 
 @Module({
   imports: [
@@ -47,6 +48,7 @@ import { EmailModule } from './modules/email/email.module';
     IncomeTypesModule,
     IncomesModule,
     EmailModule,
+    CreditCardStatementModule,
   ],
   controllers: [],
   providers: [],
