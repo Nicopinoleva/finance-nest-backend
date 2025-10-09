@@ -24,18 +24,17 @@ export interface Transaction {
   totalAmount: number;
   installment: string;
   monthlyInstallment: number;
-  cardNumber?: string;
+  reference: string;
 }
 
-export interface CardTransactions {
-  cardNumber: string;
+export interface TransactionCategory {
+  parsedTotal: number;
+  calculatedTotal: number;
   transactions: Transaction[];
-  cardTotal: number;
 }
 
 export interface ParsedStatement {
-  transactionsByCard: CardTransactions[];
-  allTransactions: Transaction[];
+  transactions: Record<string, TransactionCategory>;
   totalOperations: number;
   totalPayments: number;
   totalPAT: number;

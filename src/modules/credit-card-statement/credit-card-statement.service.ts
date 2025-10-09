@@ -7,11 +7,11 @@ import type { PDFPageProxy } from 'pdfjs-dist';
 import { TextItem } from 'pdfjs-dist/types/src/display/api';
 import { CreditCardStatementBanks } from 'src/utils';
 import {
-  CardTransactions,
   CutRegion,
   ParsedStatement,
   RegionBounds,
   Transaction,
+  TransactionCategory,
   TransactionsCoordinates,
 } from './credit-card-statement.interface';
 
@@ -194,42 +194,36 @@ export class CreditCardStatementService {
   }
 
   parseTransactionText(text: string): ParsedStatement {
-    const allTransactions: Transaction[] = [];
-    const transactionsByCard: CardTransactions[] = [];
-    let totalOperations = 0;
+    const transactionsMap: Map<string, TransactionCategory> = new Map();
     let totalPayments = 0;
+    let totalOperations = 0;
     let totalPAT = 0;
     let totalInstallments = 0;
     let totalCharges = 0;
 
     // Extract totals
-    const totalOpsMatch = RegExp(/TOTAL OPERACIONES[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-    if (totalOpsMatch) totalOperations = this.parseAmount(totalOpsMatch[1]);
+    const totalOperationsMatch = RegExp(/TOTAL OPERACIONES[^$]*\$\s*(-?[\d.,]+)/).exec(text);
 
-    const totalPayMatch = RegExp(/TOTAL PAGOS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-    if (totalPayMatch) totalPayments = this.parseAmount(totalPayMatch[1]);
+    const totalPaymentsMatch = RegExp(/TOTAL PAGOS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
 
     const totalPATMatch = RegExp(/TOTAL PAT A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-    if (totalPATMatch) totalPAT = this.parseAmount(totalPATMatch[1]);
-
-    const totalInstMatch = RegExp(/TOTAL COMPRAS EN CUOTAS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-    if (totalInstMatch) totalInstallments = this.parseAmount(totalInstMatch[1]);
-
-    const totalChargesMatch = RegExp(/CARGOS, COMISIONES[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-    if (totalChargesMatch) totalCharges = this.parseAmount(totalChargesMatch[1]);
 
     // To identify multiple cards
     const cardTotalPattern = /TOTAL TARJETA (X+\d{4})[^$]*\$\s*(-?[\d.,]+)/g;
 
-    const cardNumberMatches = text.matchAll(cardTotalPattern);
-    const cardSections = Array.from(cardNumberMatches).map((match) => ({
-      cardNumber: match[1],
-      total: this.parseAmount(match[2]),
+    const referenceMatches = text.matchAll(cardTotalPattern);
+    const creditCardsMatches = Array.from(referenceMatches).map((match) => ({
+      reference: match[1],
+      parsedTotal: this.parseAmount(match[2]),
       index: match.index,
     }));
 
-    // Sort card sections by their position in text
-    cardSections.sort((a, b) => a.index - b.index);
+    // Sort credit cards by their position in text
+    creditCardsMatches.sort((a, b) => a.index - b.index);
+
+    const totalInstallmentsMatch = RegExp(/TOTAL COMPRAS EN CUOTAS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
+
+    const totalChargesMatch = RegExp(/CARGOS, COMISIONES[^$]*\$\s*(-?[\d.,]+)/).exec(text);
 
     const location = String.raw`([A-Z]+(?:\s+[A-Z]+)*)?`; // Uppercase words with spaces, optional
     const date = String.raw`\d{2}/\d{2}/\d{2}`; // DD/MM/YY
@@ -256,51 +250,86 @@ export class CreditCardStatementService {
     const transactionMatches = text.matchAll(transactionPattern);
 
     for (const match of transactionMatches) {
-      const [, location, date, code, description, opAmount, totalAmount, installment, monthlyAmount] = match;
+      const [, location, date, code, description, operationAmount, totalAmount, installment, monthlyAmount] = match;
 
       const transactionIndex = match.index;
-      let cardNumber = 'UNKNOWN';
+      const parsedMonthlyAmount = this.parseAmount(monthlyAmount);
+      const parsedOperationAmount = this.parseAmount(operationAmount);
+      const parsedTotalAmount = this.parseAmount(totalAmount);
 
-      // In banco de Chile, the card number "TOTAL TARJETA XXXX1234" is at the end of each card's transactions
-      for (const element of cardSections) {
-        // Reason for the <
-        if (transactionIndex < element.index) {
-          cardNumber = element.cardNumber;
-          break;
-        }
-      }
+      let reference = '';
 
       const transaction: Transaction = {
         location: location || 'N/A',
         date: date,
         referenceCode: code,
         description: description.trim(),
-        operationAmount: this.parseAmount(opAmount),
-        totalAmount: this.parseAmount(totalAmount),
+        operationAmount: parsedOperationAmount,
+        totalAmount: parsedTotalAmount,
         installment: installment,
-        monthlyInstallment: this.parseAmount(monthlyAmount),
-        cardNumber: cardNumber,
+        monthlyInstallment: parsedMonthlyAmount,
+        reference: reference,
       };
 
-      allTransactions.push(transaction);
+      // The totals always appear at the end of the statement, so we can use their position to categorize transactions
+      if (totalPaymentsMatch && totalPaymentsMatch.index > transactionIndex) {
+        totalPayments += parsedMonthlyAmount;
+        reference = 'PAYMENT';
+        this.addTransactionToCategory(
+          transactionsMap,
+          { ...transaction, reference: reference },
+          totalPayments,
+          parsedMonthlyAmount,
+        );
+      } else if (totalPATMatch && totalPATMatch.index > transactionIndex) {
+        totalPAT += parsedMonthlyAmount;
+        reference = 'PAT';
+        this.addTransactionToCategory(
+          transactionsMap,
+          { ...transaction, reference: reference },
+          totalPAT,
+          parsedMonthlyAmount,
+        );
+      } else if (
+        creditCardsMatches.find((card) => {
+          if (card.index > transactionIndex) {
+            reference = card.reference;
+            this.addTransactionToCategory(
+              transactionsMap,
+              { ...transaction, reference: reference },
+              card.parsedTotal,
+              parsedMonthlyAmount,
+            );
+            return true;
+          }
+        })
+      ) {
+        totalOperations += parsedMonthlyAmount;
+      } else if (totalInstallmentsMatch && totalInstallmentsMatch.index > transactionIndex) {
+        totalInstallments += parsedMonthlyAmount;
+        reference = 'INSTALLMENT';
+        this.addTransactionToCategory(
+          transactionsMap,
+          { ...transaction, reference: reference },
+          totalInstallments,
+          parsedMonthlyAmount,
+        );
+      }
+      // Charges do not have end total, so we assume they appear after all cards
+      else if (totalChargesMatch && totalChargesMatch.index < transactionIndex) {
+        totalCharges += parsedMonthlyAmount;
+        reference = 'CHARGE';
+        this.addTransactionToCategory(
+          transactionsMap,
+          { ...transaction, reference: reference },
+          totalCharges,
+          parsedMonthlyAmount,
+        );
+      }
     }
 
-    // Group transactions by card
-    cardSections.forEach((cardSection) => {
-      const cardTransactions = allTransactions.filter((t) => t.cardNumber === cardSection.cardNumber);
-
-      if (cardTransactions.length > 0) {
-        transactionsByCard.push({
-          cardNumber: cardSection.cardNumber,
-          transactions: cardTransactions,
-          cardTotal: cardSection.total,
-        });
-      }
-    });
-
     return {
-      transactionsByCard,
-      allTransactions,
+      transactions: Object.fromEntries(transactionsMap),
       totalOperations,
       totalPayments,
       totalPAT,
@@ -313,6 +342,24 @@ export class CreditCardStatementService {
     // Remove currency symbols, spaces, thousand separators, and convert Chilean decimal format
     // Chilean format: 1.234.567,89 or -1.234.567,89
     return parseFloat(amountStr.replace(/[$\s.,]/g, (match) => (match === ',' ? '.' : '')));
+  }
+
+  private addTransactionToCategory(
+    transactionsMap: Map<string, TransactionCategory>,
+    transaction: Transaction,
+    parsedTotalAmount: number,
+    parsedMonthlyAmount: number,
+  ) {
+    const { reference } = transaction;
+    if (!transactionsMap.has(reference)) {
+      transactionsMap.set(reference, { transactions: [], parsedTotal: 0, calculatedTotal: 0 });
+    }
+    const category = transactionsMap.get(reference);
+    if (category) {
+      category.transactions.push(transaction);
+      category.parsedTotal = parsedTotalAmount;
+      category.calculatedTotal += parsedMonthlyAmount;
+    }
   }
 
   /**
