@@ -3,7 +3,7 @@ import { ApolloServerPluginLandingPageLocalDefault } from '@apollo/server/plugin
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { GraphQLModule } from '@nestjs/graphql';
-import { TypeOrmModule } from '@nestjs/typeorm';
+import { getDataSourceToken, TypeOrmModule } from '@nestjs/typeorm';
 import { join } from 'path';
 import { UsersModule } from './modules/users/users.module';
 import { PaymentMethodsModule } from './modules/payment-methods/payment-methods/payment-methods.module';
@@ -19,6 +19,9 @@ import { IncomesModule } from './modules/incomes/incomes/incomes.module';
 import { getDatabaseConfig } from './database/database.config';
 import { EmailModule } from './modules/email/email.module';
 import { CreditCardStatementModule } from './modules/credit-card-statement/credit-card-statement.module';
+import { ClsModule } from 'nestjs-cls';
+import { ClsPluginTransactional } from '@nestjs-cls/transactional/dist/src/lib/plugin-transactional';
+import { TransactionalAdapterTypeOrm } from '@nestjs-cls/transactional-adapter-typeorm/dist/src/lib/transactional-adapter-typeorm';
 
 @Module({
   imports: [
@@ -26,6 +29,18 @@ import { CreditCardStatementModule } from './modules/credit-card-statement/credi
     TypeOrmModule.forRootAsync({
       imports: [
         ConfigModule,
+        ClsModule.forRoot({
+          global: true,
+          guard: { mount: false },
+          plugins: [
+            new ClsPluginTransactional({
+              imports: [TypeOrmModule],
+              adapter: new TransactionalAdapterTypeOrm({
+                dataSourceToken: getDataSourceToken(),
+              }),
+            }),
+          ],
+        }),
         GraphQLModule.forRoot<ApolloDriverConfig>({
           driver: ApolloDriver,
           autoSchemaFile: join(process.cwd(), 'src/schema.gql'),

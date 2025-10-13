@@ -52,6 +52,11 @@ type BankAccountType {
   updatedBy: Users
 }
 
+type CreditCardStatementReference {
+  id: ID!
+  name: String!
+}
+
 type ExpenseType {
   id: ID!
   name: String!

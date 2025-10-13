@@ -1,7 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import PdfParse from 'pdf-parse-new';
 import { promises as fs } from 'fs';
-import path from 'path';
+import path, { parse } from 'path';
 import { PDFDocument } from 'pdf-lib';
 import type { PDFPageProxy } from 'pdfjs-dist';
 import { TextItem } from 'pdfjs-dist/types/src/display/api';
@@ -14,10 +14,13 @@ import {
   TransactionCategory,
   TransactionsCoordinates,
 } from './credit-card-statement.interface';
+import { ExpensesService } from '@modules/expenses/expenses/expenses.service';
+import { CreditCardStatementReferencesEnum } from 'src/utils/constants/credit-card-statement-references';
 
 @Injectable()
 export class CreditCardStatementService {
-  constructor() {}
+  private creditCardStatementPDF: PDFDocument;
+  constructor(private readonly expensesService: ExpensesService) {}
 
   async parseCreditCardStatement(
     file: Express.Multer.File,
@@ -27,7 +30,9 @@ export class CreditCardStatementService {
   ): Promise<ParsedStatement> {
     let transactionsTableCoordinates: TransactionsCoordinates[] = [];
     let transactionsEndCoorditnates: TransactionsCoordinates[] = [];
+    let mainCreditCardTextCoordinates: TransactionsCoordinates[] = [];
     if (bankToParse === CreditCardStatementBanks.BancoDeChile) {
+      mainCreditCardTextCoordinates = await this.findTextCoordinates(file, 'N° DE TARJETA DE CRÉDITO');
       transactionsTableCoordinates = await this.findTextCoordinates(file, '2. PERIODO ACTUAL');
       transactionsEndCoorditnates = await this.findTextCoordinates(file, 'III. INFORMACIÓN DE PAGO');
     }
@@ -42,16 +47,32 @@ export class CreditCardStatementService {
       );
     }
 
-    return await this.extractAndParseTransactions(transactionsTableCoordinates, transactionsEndCoorditnates, file);
+    return await this.extractAndParseTransactions(
+      mainCreditCardTextCoordinates,
+      transactionsTableCoordinates,
+      transactionsEndCoorditnates,
+      file,
+    );
   }
 
   async extractAndParseTransactions(
+    mainCreditCardTextCoordinates: TransactionsCoordinates[],
     transactionsTableCoordinates: TransactionsCoordinates[],
     transactionsEndCoorditnates: TransactionsCoordinates[],
     file: Express.Multer.File,
   ): Promise<ParsedStatement> {
-    const pdfDoc = await PDFDocument.load(file.buffer);
+    if (!this.creditCardStatementPDF) {
+      this.creditCardStatementPDF = await PDFDocument.load(file.buffer);
+    }
+    const pdfDoc = this.creditCardStatementPDF;
     const pages = pdfDoc.getPages();
+
+    const mainCreditCardText = await this.extractTextFromCoordinates(
+      file.buffer,
+      mainCreditCardTextCoordinates[0].page,
+      mainCreditCardTextCoordinates[0].y,
+      mainCreditCardTextCoordinates[0].y + mainCreditCardTextCoordinates[0].height,
+    );
 
     const allTransactionsText: string[] = [];
 
@@ -77,7 +98,7 @@ export class CreditCardStatementService {
       allTransactionsText.push(regionText);
     }
 
-    return this.parseTransactionText(allTransactionsText.join('\n'));
+    return this.parseTransactionText(mainCreditCardText, allTransactionsText.join('\n'));
   }
 
   /**
@@ -111,8 +132,10 @@ export class CreditCardStatementService {
     const pdfBuffer = file.buffer;
     const textItems: TransactionsCoordinates[] = [];
 
-    const pdfDoc = await PDFDocument.load(pdfBuffer);
-    const pages = pdfDoc.getPages();
+    if (!this.creditCardStatementPDF) {
+      this.creditCardStatementPDF = await PDFDocument.load(pdfBuffer);
+    }
+    const pages = this.creditCardStatementPDF.getPages();
     const pageSizes = pages.map((page) => page.getSize());
 
     const options = {
@@ -149,8 +172,10 @@ export class CreditCardStatementService {
     startY: number,
     endY: number,
   ): Promise<string> {
-    const pdfDoc = await PDFDocument.load(pdfBuffer);
-    const pages = pdfDoc.getPages();
+    if (!this.creditCardStatementPDF) {
+      this.creditCardStatementPDF = await PDFDocument.load(pdfBuffer);
+    }
+    const pages = this.creditCardStatementPDF.getPages();
     const pageHeight = pages[pageNumber].getSize().height;
 
     const options = {
@@ -193,20 +218,27 @@ export class CreditCardStatementService {
     return data.text;
   }
 
-  parseTransactionText(text: string): ParsedStatement {
+  async parseTransactionText(mainCreditCard: string, text: string): Promise<ParsedStatement> {
     const transactionsMap: Map<string, TransactionCategory> = new Map();
     let totalPayments = 0;
-    let totalOperations = 0;
+    let totalTransactions = 0;
     let totalPAT = 0;
     let totalInstallments = 0;
     let totalCharges = 0;
 
+    const mainCreditCardNumberMatch = RegExp(/\d{4}(?=\D*$)/).exec(mainCreditCard);
+    if (!mainCreditCardNumberMatch) {
+      throw new HttpException('Could not extract main credit card number', HttpStatus.UNPROCESSABLE_ENTITY);
+    }
     // Extract totals
     const totalOperationsMatch = RegExp(/TOTAL OPERACIONES[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-
     const totalPaymentsMatch = RegExp(/TOTAL PAGOS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-
     const totalPATMatch = RegExp(/TOTAL PAT A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
+    const totalInstallmentsMatch = RegExp(/TOTAL COMPRAS EN CUOTAS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
+    const totalChargesMatch = RegExp(/CARGOS, COMISIONES[^$]*\$\s*(-?[\d.,]+)/).exec(text);
+
+    const parsedTotalOperations = totalOperationsMatch ? this.parseAmount(totalOperationsMatch[1]) : 0;
+    const parsedTotalCharges = totalChargesMatch ? this.parseAmount(totalChargesMatch[1]) : 0;
 
     // To identify multiple cards
     const cardTotalPattern = /TOTAL TARJETA (X+\d{4})[^$]*\$\s*(-?[\d.,]+)/g;
@@ -220,10 +252,6 @@ export class CreditCardStatementService {
 
     // Sort credit cards by their position in text
     creditCardsMatches.sort((a, b) => a.index - b.index);
-
-    const totalInstallmentsMatch = RegExp(/TOTAL COMPRAS EN CUOTAS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-
-    const totalChargesMatch = RegExp(/CARGOS, COMISIONES[^$]*\$\s*(-?[\d.,]+)/).exec(text);
 
     const location = String.raw`([A-Z]+(?:\s+[A-Z]+)*)?`; // Uppercase words with spaces, optional
     const date = String.raw`\d{2}/\d{2}/\d{2}`; // DD/MM/YY
@@ -274,7 +302,7 @@ export class CreditCardStatementService {
       // The totals always appear at the end of the statement, so we can use their position to categorize transactions
       if (totalPaymentsMatch && totalPaymentsMatch.index > transactionIndex) {
         totalPayments += parsedMonthlyAmount;
-        reference = 'PAYMENT';
+        reference = CreditCardStatementReferencesEnum.PAYMENT;
         this.addTransactionToCategory(
           transactionsMap,
           { ...transaction, reference: reference },
@@ -283,7 +311,7 @@ export class CreditCardStatementService {
         );
       } else if (totalPATMatch && totalPATMatch.index > transactionIndex) {
         totalPAT += parsedMonthlyAmount;
-        reference = 'PAT';
+        reference = CreditCardStatementReferencesEnum.PAT;
         this.addTransactionToCategory(
           transactionsMap,
           { ...transaction, reference: reference },
@@ -304,10 +332,10 @@ export class CreditCardStatementService {
           }
         })
       ) {
-        totalOperations += parsedMonthlyAmount;
+        totalTransactions += parsedMonthlyAmount;
       } else if (totalInstallmentsMatch && totalInstallmentsMatch.index > transactionIndex) {
         totalInstallments += parsedMonthlyAmount;
-        reference = 'INSTALLMENT';
+        reference = CreditCardStatementReferencesEnum.INSTALLMENT;
         this.addTransactionToCategory(
           transactionsMap,
           { ...transaction, reference: reference },
@@ -318,7 +346,7 @@ export class CreditCardStatementService {
       // Charges do not have end total, so we assume they appear after all cards
       else if (totalChargesMatch && totalChargesMatch.index < transactionIndex) {
         totalCharges += parsedMonthlyAmount;
-        reference = 'CHARGE';
+        reference = CreditCardStatementReferencesEnum.CHARGE;
         this.addTransactionToCategory(
           transactionsMap,
           { ...transaction, reference: reference },
@@ -328,14 +356,34 @@ export class CreditCardStatementService {
       }
     }
 
-    return {
+    const totalCalculatedOperations = totalPayments + totalTransactions + totalPAT + totalInstallments;
+
+    if (parsedTotalOperations !== totalCalculatedOperations) {
+      throw new HttpException(
+        `Parsed operations do not match parsed value: ${parsedTotalOperations} !== ${totalCalculatedOperations}`,
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    } else if (parsedTotalCharges !== totalCharges) {
+      throw new HttpException(
+        `Parsed charges do not match parsed value: ${parsedTotalCharges} !== ${totalCharges}`,
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    const parsedStatement: ParsedStatement = {
+      mainCreditCard: mainCreditCardNumberMatch[0],
       transactions: Object.fromEntries(transactionsMap),
-      totalOperations,
+      totalOperations: totalCalculatedOperations,
       totalPayments,
       totalPAT,
+      totalTransactions,
       totalInstallments,
       totalCharges,
     };
+
+    await this.expensesService.saveParsedExpensesFromCreditCardStatement(parsedStatement);
+
+    return parsedStatement;
   }
 
   private parseAmount(amountStr: string): number {
@@ -374,7 +422,10 @@ export class CreditCardStatementService {
     const fileName = 'transaction_regions.pdf';
     const outputPath = filePath ? `${filePath}/${fileName}` : path.join(process.cwd(), fileName);
 
-    const pdfDoc = await PDFDocument.load(file.buffer);
+    if (!this.creditCardStatementPDF) {
+      this.creditCardStatementPDF = await PDFDocument.load(file.buffer);
+    }
+    const pdfDoc = this.creditCardStatementPDF;
     const pages = pdfDoc.getPages();
 
     const newPdfDoc = await PDFDocument.create();

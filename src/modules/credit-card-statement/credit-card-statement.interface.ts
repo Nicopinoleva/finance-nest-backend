@@ -34,10 +34,12 @@ export interface TransactionCategory {
 }
 
 export interface ParsedStatement {
+  mainCreditCard: string;
   transactions: Record<string, TransactionCategory>;
   totalOperations: number;
   totalPayments: number;
   totalPAT: number;
+  totalTransactions: number;
   totalInstallments: number;
   totalCharges: number;
 }
