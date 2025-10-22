@@ -21,6 +21,25 @@ A date-time string at UTC, such as 2007-12-03T10:15:30Z, compliant with the `dat
 """
 scalar DateTime
 
+type PaymentMethodTypes {
+  id: ID!
+  name: String!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  createdBy: Users!
+  updatedBy: Users
+}
+
+type BankAccountType {
+  id: ID!
+  name: String!
+  bankAccount: [BankAccount!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  createdBy: Users!
+  updatedBy: Users
+}
+
 type Banks {
   id: ID!
   name: String!
@@ -42,10 +61,12 @@ type BankAccount {
   updatedBy: Users
 }
 
-type BankAccountType {
+type PaymentMethod {
   id: ID!
   name: String!
-  bankAccount: [BankAccount!]!
+  description: String
+  bankAccount: BankAccount!
+  paymentMethodType: PaymentMethodTypes!
   createdAt: DateTime!
   updatedAt: DateTime!
   createdBy: Users!
@@ -66,26 +87,53 @@ type ExpenseType {
   updatedBy: Users
 }
 
-type PaymentMethodTypes {
+type Expense {
   id: ID!
-  name: String!
+  description: String!
+  operationAmount: Int!
+  totalAmount: Int!
+  monthlyInstallment: Int!
+  installment: String!
+  date: DateTime!
+  referenceCode: String
+  paymentMethod: PaymentMethod!
+  creditCardStatement: CreditCardStatement
+  parentInstallment: Expense
+  creditCardStatementReference: CreditCardStatementReference
+  expenseType: ExpenseType!
   createdAt: DateTime!
   updatedAt: DateTime!
   createdBy: Users!
   updatedBy: Users
 }
 
-type PaymentMethod {
+type CreditCardStatement {
   id: ID!
-  name: String!
-  description: String
-  bankAccount: BankAccount!
-  paymentMethodType: PaymentMethodTypes!
+  billingPeriodStart: Date!
+  billingPeriodEnd: Date!
+  dueDate: Date!
+  dueAmount: Int!
+  minimumPayment: Int!
+  previousStatementDebt: Int!
+  totalOperations: Int!
+  totalPayments: Int!
+  totalPAT: Int!
+  totalTransactions: Int!
+  totalInstallments: Int!
+  totalCharges: Int!
+  totalUnbilledInstallments: Int
+  creditCard: PaymentMethod!
+  expenses: [Expense!]!
   createdAt: DateTime!
   updatedAt: DateTime!
   createdBy: Users!
   updatedBy: Users
 }
+
+"""
+A date string, such as 2007-12-03, compliant with the `full-date` format outlined in section 5.6 of the RFC 3339 profile of the ISO 8601 standard for representation of dates and times using the Gregorian calendar.
+"""
+scalar Date
 
 type IncomeType {
   id: ID!
@@ -142,8 +190,3 @@ input CreateIncomeInput {
   """Cuenta"""
   bankAccountId: ID!
 }
-
-"""
-A date string, such as 2007-12-03, compliant with the `full-date` format outlined in section 5.6 of the RFC 3339 profile of the ISO 8601 standard for representation of dates and times using the Gregorian calendar.
-"""
-scalar Date

@@ -3,4 +3,5 @@ export enum CreditCardStatementReferencesEnum {
   PAT = 'PAT',
   INSTALLMENT = 'INSTALLMENT',
   CHARGE = 'CHARGE',
+  UNBILLED_INSTALLMENT = 'UNBILLED_INSTALLMENT',
 }

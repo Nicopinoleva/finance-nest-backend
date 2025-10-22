@@ -5,6 +5,7 @@ import { Column, CreateDateColumn, Entity, ManyToOne, PrimaryGeneratedColumn, Up
 import { PaymentMethod } from '../payment-methods/payment-method.entity';
 import { ExpenseType } from './expense-type.entity';
 import { CreditCardStatementReference } from '../credit-card-statement/credit-card-statement-reference.entity';
+import { CreditCardStatement } from '../credit-card-statement/credit-card-statement.entity';
 
 @Entity()
 @ObjectType()
@@ -45,6 +46,14 @@ export class Expense {
   @Field(() => PaymentMethod)
   paymentMethod: PaymentMethod;
 
+  @ManyToOne(() => CreditCardStatement, { nullable: true })
+  @Field(() => CreditCardStatement, { nullable: true })
+  creditCardStatement: CreditCardStatement | null;
+
+  @ManyToOne(() => Expense, { nullable: true })
+  @Field(() => Expense, { nullable: true })
+  parentInstallment: Expense | null;
+
   @ManyToOne(() => CreditCardStatementReference, { nullable: true })
   @Field(() => CreditCardStatementReference, { nullable: true })
   creditCardStatementReference: CreditCardStatementReference | null;
@@ -63,6 +72,12 @@ export class Expense {
 
   @Column({ type: 'uuid' })
   paymentMethodId: string;
+
+  @Column({ type: 'uuid', nullable: true })
+  creditCardStatementId: string | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  parentInstallmentId: string | null;
 
   @Column({ type: 'uuid' })
   expenseTypeId: string;

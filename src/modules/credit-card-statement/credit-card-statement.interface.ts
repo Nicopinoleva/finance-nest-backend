@@ -35,6 +35,12 @@ export interface TransactionCategory {
 
 export interface ParsedStatement {
   mainCreditCard: string;
+  billingPeriodStart: Date;
+  billingPeriodEnd: Date;
+  dueDate: Date;
+  dueAmount: number;
+  minimumPayment: number;
+  previousStatementDebt: number;
   transactions: Record<string, TransactionCategory>;
   totalOperations: number;
   totalPayments: number;
@@ -42,6 +48,7 @@ export interface ParsedStatement {
   totalTransactions: number;
   totalInstallments: number;
   totalCharges: number;
+  totalUnbilledInstallments: number | null;
 }
 
 export interface RegionBounds {
