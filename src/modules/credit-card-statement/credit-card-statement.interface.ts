@@ -22,25 +22,35 @@ export interface Transaction {
   description: string;
   operationAmount: number;
   totalAmount: number;
-  installment: string;
-  monthlyInstallment: number;
-  cardNumber?: string;
+  currentInstallment: number;
+  totalInstallments: number;
+  monthlyAmount: number;
+  reference: string;
 }
 
-export interface CardTransactions {
-  cardNumber: string;
+export interface TransactionCategory {
+  parsedTotal: number;
+  calculatedTotal: number;
   transactions: Transaction[];
-  cardTotal: number;
 }
 
 export interface ParsedStatement {
-  transactionsByCard: CardTransactions[];
-  allTransactions: Transaction[];
+  creditCardStatementId: string;
+  mainCreditCard: string;
+  billingPeriodStart: Date;
+  billingPeriodEnd: Date;
+  dueDate: Date;
+  dueAmount: number;
+  minimumPayment: number;
+  previousStatementDebt: number;
+  transactions: Record<string, TransactionCategory>;
   totalOperations: number;
   totalPayments: number;
   totalPAT: number;
+  totalTransactions: number;
   totalInstallments: number;
   totalCharges: number;
+  totalUnbilledInstallments: number | null;
 }
 
 export interface RegionBounds {
