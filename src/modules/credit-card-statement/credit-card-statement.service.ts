@@ -21,6 +21,8 @@ import { CreditCardStatement } from '@entities/credit-card-statement/credit-card
 import { Repository } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
 import { PaymentMethodsService } from '@modules/payment-methods/payment-methods/payment-methods.service';
+import { Transactional, TransactionHost } from '@nestjs-cls/transactional';
+import { TransactionalAdapterTypeOrm } from '@nestjs-cls/transactional-adapter-typeorm';
 
 @Injectable({ scope: Scope.REQUEST })
 export class CreditCardStatementService {
@@ -39,6 +41,7 @@ export class CreditCardStatementService {
     private readonly creditCardStatementRepository: Repository<CreditCardStatement>,
     private readonly paymentMethodService: PaymentMethodsService,
     private readonly expensesService: ExpensesService,
+    private readonly txHost: TransactionHost<TransactionalAdapterTypeOrm>,
   ) {}
 
   async parseCreditCardStatement(
@@ -305,6 +308,7 @@ export class CreditCardStatementService {
   }
 
   // TODO: Atomize to smaller functions
+  @Transactional()
   async parseTransactionText(
     mainCreditCard: string,
     billingPeriodStartEnd: string,
@@ -326,8 +330,6 @@ export class CreditCardStatementService {
     if (!mainCreditCardNumberMatch) {
       throw new HttpException('Could not extract main credit card number', HttpStatus.UNPROCESSABLE_ENTITY);
     }
-
-    const creditCardId = await this.paymentMethodService.getIdByName(mainCreditCardNumberMatch[0]);
 
     const billingPeriodMatch = billingPeriodStartEnd.match(/\d{2}-\d{2}-\d{4}/g);
     if (!billingPeriodMatch) {
@@ -352,6 +354,22 @@ export class CreditCardStatementService {
     const previousStatementDebtMatch = new RegExp(/\$\s*(-?[\d.,]+)/).exec(previousStatementDebtCoordinatesText);
     if (!previousStatementDebtMatch) {
       throw new HttpException('Could not extract previous statement debt amount', HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    const creditCardId = await this.paymentMethodService.getIdByName(mainCreditCardNumberMatch[0]);
+    const billingPeriodStart = parse(billingPeriodMatch[0], 'dd-MM-yyyy', new Date());
+    const billingPeriodEnd = parse(billingPeriodMatch[1], 'dd-MM-yyyy', new Date());
+
+    const checkRepeatedStatement = await this.creditCardStatementRepository.exists({
+      where: {
+        creditCardId: creditCardId,
+        billingPeriodStart: billingPeriodStart,
+        billingPeriodEnd: billingPeriodEnd,
+      },
+    });
+
+    if (checkRepeatedStatement) {
+      throw new HttpException('Statement already exists', HttpStatus.NOT_ACCEPTABLE);
     }
 
     // Extract totals
@@ -408,12 +426,16 @@ export class CreditCardStatementService {
     const transactionMatches = text.matchAll(transactionPattern);
 
     for (const match of transactionMatches) {
-      const [, location, date, code, description, operationAmount, totalAmount, installment, monthlyAmount] = match;
+      const [, location, date, code, description, operationAmount, totalAmount, installments, monthlyAmount] = match;
 
       const transactionIndex = match.index;
       const parsedMonthlyAmount = this.parseAmount(monthlyAmount);
       const parsedOperationAmount = this.parseAmount(operationAmount);
       const parsedTotalAmount = this.parseAmount(totalAmount);
+
+      const [parsedCurrentInstallment, parsedTotalInstallments] = installments
+        .split('/')
+        .map((installment) => Number.parseInt(installment));
 
       const transaction: Transaction = {
         location: location || 'N/A',
@@ -422,8 +444,9 @@ export class CreditCardStatementService {
         description: description.trim(),
         operationAmount: parsedOperationAmount,
         totalAmount: parsedTotalAmount,
-        installment: installment,
-        monthlyInstallment: parsedMonthlyAmount,
+        currentInstallment: parsedCurrentInstallment,
+        totalInstallments: parsedTotalInstallments,
+        monthlyAmount: parsedMonthlyAmount,
         reference: '',
       };
 
@@ -518,10 +541,10 @@ export class CreditCardStatementService {
       );
     }
 
-    const parsedStatement = await this.creditCardStatementRepository.save({
+    const parsedStatement = await this.txHost.tx.save(CreditCardStatement, {
       creditCardId: creditCardId,
-      billingPeriodStart: parse(billingPeriodMatch[0], 'dd-MM-yyyy', new Date()),
-      billingPeriodEnd: parse(billingPeriodMatch[1], 'dd-MM-yyyy', new Date()),
+      billingPeriodStart: billingPeriodStart,
+      billingPeriodEnd: billingPeriodEnd,
       dueDate: parse(dueDateMatch[0], 'dd/MM/yyyy', new Date()),
       dueAmount: this.parseAmount(dueAmountMatch[1]),
       minimumPayment: this.parseAmount(minimumPaymentMatch[1]),
@@ -536,10 +559,16 @@ export class CreditCardStatementService {
       createdById: 'c3983079-8ad2-4057-aa26-5418e1003563',
     });
 
-    // await this.expensesService.saveParsedExpensesFromCreditCardStatement(parsedStatement);
+    await this.expensesService.saveParsedExpensesFromCreditCardStatement({
+      ...parsedStatement,
+      creditCardStatementId: parsedStatement.id,
+      mainCreditCard: mainCreditCardNumberMatch[0],
+      transactions: Object.fromEntries(transactionsMap),
+    });
 
     return {
       ...parsedStatement,
+      creditCardStatementId: parsedStatement.id,
       mainCreditCard: mainCreditCardNumberMatch[0],
       transactions: Object.fromEntries(transactionsMap),
     };

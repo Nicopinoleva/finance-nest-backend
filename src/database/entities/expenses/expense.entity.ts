@@ -1,6 +1,6 @@
 import { Users } from '../users/users.entity';
 import { Field, ID, Int, ObjectType } from '@nestjs/graphql';
-import { GraphQLDateTime } from 'graphql-scalars';
+import { GraphQLDate, GraphQLDateTime } from 'graphql-scalars';
 import { Column, CreateDateColumn, Entity, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 import { PaymentMethod } from '../payment-methods/payment-method.entity';
 import { ExpenseType } from './expense-type.entity';
@@ -28,14 +28,18 @@ export class Expense {
 
   @Column({ type: 'integer' })
   @Field(() => Int)
-  monthlyInstallment: number;
+  monthlyAmount: number;
 
-  @Column('varchar')
-  @Field(() => String)
-  installment: string;
+  @Column({ type: 'integer' })
+  @Field(() => Int)
+  currentInstallment: number;
+
+  @Column({ type: 'integer' })
+  @Field(() => Int)
+  totalInstallments: number;
 
   @Column({ type: 'date' })
-  @Field(() => GraphQLDateTime)
+  @Field(() => GraphQLDate)
   date: Date;
 
   @Column('varchar', { nullable: true })

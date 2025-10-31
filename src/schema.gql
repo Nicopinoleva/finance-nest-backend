@@ -92,9 +92,10 @@ type Expense {
   description: String!
   operationAmount: Int!
   totalAmount: Int!
-  monthlyInstallment: Int!
-  installment: String!
-  date: DateTime!
+  monthlyAmount: Int!
+  currentInstallment: Int!
+  totalInstallments: Int!
+  date: Date!
   referenceCode: String
   paymentMethod: PaymentMethod!
   creditCardStatement: CreditCardStatement
@@ -106,6 +107,11 @@ type Expense {
   createdBy: Users!
   updatedBy: Users
 }
+
+"""
+A date string, such as 2007-12-03, compliant with the `full-date` format outlined in section 5.6 of the RFC 3339 profile of the ISO 8601 standard for representation of dates and times using the Gregorian calendar.
+"""
+scalar Date
 
 type CreditCardStatement {
   id: ID!
@@ -129,11 +135,6 @@ type CreditCardStatement {
   createdBy: Users!
   updatedBy: Users
 }
-
-"""
-A date string, such as 2007-12-03, compliant with the `full-date` format outlined in section 5.6 of the RFC 3339 profile of the ISO 8601 standard for representation of dates and times using the Gregorian calendar.
-"""
-scalar Date
 
 type IncomeType {
   id: ID!

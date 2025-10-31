@@ -22,8 +22,9 @@ export interface Transaction {
   description: string;
   operationAmount: number;
   totalAmount: number;
-  installment: string;
-  monthlyInstallment: number;
+  currentInstallment: number;
+  totalInstallments: number;
+  monthlyAmount: number;
   reference: string;
 }
 
@@ -34,6 +35,7 @@ export interface TransactionCategory {
 }
 
 export interface ParsedStatement {
+  creditCardStatementId: string;
   mainCreditCard: string;
   billingPeriodStart: Date;
   billingPeriodEnd: Date;
