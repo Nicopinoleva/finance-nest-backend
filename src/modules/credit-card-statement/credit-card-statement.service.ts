@@ -1,11 +1,11 @@
 import { HttpException, HttpStatus, Injectable, Scope } from '@nestjs/common';
 import PdfParse from 'pdf-parse-new';
-import { promises as fs } from 'fs';
-import path from 'path';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import type { PDFPageProxy } from 'pdfjs-dist';
 import { TextItem } from 'pdfjs-dist/types/src/display/api';
-import { CreditCardStatementBanks } from 'src/utils';
+import { CreditCardStatementBanks, removeAccents } from 'src/utils';
 import {
   CutRegion,
   ParsedStatement,
@@ -15,7 +15,7 @@ import {
   TransactionsCoordinates,
 } from './credit-card-statement.interface';
 import { ExpensesService } from '@modules/expenses/expenses/expenses.service';
-import { CreditCardStatementReferencesEnum } from 'src/utils/constants/credit-card-statement-references';
+import { CreditCardStatementReferencesEnum } from 'src/utils/constants/credit-card-statement-references.enum';
 import { parse } from 'date-fns';
 import { CreditCardStatement } from '@entities/credit-card-statement/credit-card-statement.entity';
 import { Repository } from 'typeorm';
@@ -51,20 +51,21 @@ export class CreditCardStatementService {
     filePath?: string,
   ): Promise<ParsedStatement> {
     if (bankToParse === CreditCardStatementBanks.BancoDeChile) {
-      this.mainCreditCardTextCoordinates = await this.findTextCoordinates(file, 'N° DE TARJETA DE CRÉDITO');
-      this.billingPeriodStartEndCoordinates = await this.findTextCoordinates(file, 'PERIODO FACTURADO');
-      this.dueDateCoordinates = await this.findTextCoordinates(file, 'PAGAR HASTA');
-      this.dueAmountCoordinates = await this.findTextCoordinates(file, 'MONTO TOTAL FACTURADO A PAGAR');
-      this.minimumPaymentCoordinates = await this.findTextCoordinates(file, 'MONTO MINIMO A PAGAR');
+      // TODO: make this one call to run throw pdf only once(check if possible with legacy pdfs, seem that they are not ordered)
+      this.mainCreditCardTextCoordinates = await this.findTextCoordinates(file, 'n° de tarjeta de credito');
+      this.billingPeriodStartEndCoordinates = await this.findTextCoordinates(file, 'periodo facturado');
+      this.dueDateCoordinates = await this.findTextCoordinates(file, 'pagar hasta');
+      this.dueAmountCoordinates = await this.findTextCoordinates(file, 'monto total facturado a pagar');
+      this.minimumPaymentCoordinates = await this.findTextCoordinates(file, 'monto minimo a pagar');
       this.previousStatementDebtCoordinates = await this.findTextCoordinates(
         file,
-        'SALDO ADEUDADO FINAL PERIODO ANTERIOR',
+        'saldo adeudado final periodo anterior',
       );
-      this.transactionsTableCoordinates = await this.findTextCoordinates(file, '2. PERIODO ACTUAL', false);
-      this.transactionsEndCoordinates = await this.findTextCoordinates(file, 'III. INFORMACIÓN DE PAGO');
+      this.transactionsTableCoordinates = await this.findTextCoordinates(file, '2. periodo actual', false);
+      this.transactionsEndCoordinates = await this.findTextCoordinates(file, 'iii. informacion de pago');
       this.unbilledStatementsTableStartCoordinates = await this.findTextCoordinates(
         file,
-        '4.INFORMACION COMPRAS EN CUOTAS',
+        '4. informacion compras en cuotas',
       );
     }
 
@@ -78,7 +79,13 @@ export class CreditCardStatementService {
 
   async extractAndParseTransactions(file: Express.Multer.File): Promise<ParsedStatement> {
     if (!this.creditCardStatementPDF) {
-      this.creditCardStatementPDF = await PDFDocument.load(file.buffer);
+      try {
+        this.creditCardStatementPDF = await PDFDocument.load(file.buffer);
+      } catch (error) {
+        if (error.message.includes('encrypted') || error.message.includes('password')) {
+          throw new HttpException('Pdf con contraseña no es soportado', HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+      }
     }
     const pdfDoc = this.creditCardStatementPDF;
     const pages = pdfDoc.getPages();
@@ -201,7 +208,13 @@ export class CreditCardStatementService {
     const textItems: TransactionsCoordinates[] = [];
 
     if (!this.creditCardStatementPDF) {
-      this.creditCardStatementPDF = await PDFDocument.load(pdfBuffer);
+      try {
+        this.creditCardStatementPDF = await PDFDocument.load(file.buffer);
+      } catch (error) {
+        if (error.message.includes('encrypted') || error.message.includes('password')) {
+          throw new HttpException('Pdf con contraseña no es soportado', HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+      }
     }
 
     const pages = this.creditCardStatementPDF.getPages();
@@ -218,22 +231,53 @@ export class CreditCardStatementService {
         const pageHeight = pageSizes[pageNumber]?.height || 792;
         const textContent = await pageData.getTextContent();
 
-        for (const item of textContent.items as TextItem[]) {
+        const items = textContent.items as TextItem[];
+        let index = 0;
+
+        while (index < items.length) {
           // Skip processing if we already found a result and should stop
           if (stopAtFirstMatch && textItems.length > 0) {
-            continue;
+            break;
           }
 
-          if (item.str.toLowerCase().includes(searchText.toLowerCase())) {
+          const item = items[index];
+
+          let groupingIndex = 0;
+
+          let groupedText = '';
+          let groupedWidth = 0;
+          while (groupingIndex <= items.length) {
+            const firstCharacterItem = items[index + groupingIndex];
+            if (groupedText === '') {
+              groupedText += firstCharacterItem.str;
+              groupedWidth += firstCharacterItem.width || 0;
+            }
+            const nextItem = textContent.items[index + groupingIndex + 1] as TextItem;
+            if (
+              nextItem &&
+              // x
+              Math.abs(nextItem.transform[4] - firstCharacterItem.transform[4]) < 7 &&
+              // y
+              Math.abs(nextItem.transform[5] - firstCharacterItem.transform[5]) < 7
+            ) {
+              groupedText += nextItem.str;
+              groupedWidth += nextItem.width || 0;
+              groupingIndex++;
+            } else {
+              break;
+            }
+          }
+          if (removeAccents(groupedText.toLowerCase()).includes(searchText)) {
             textItems.push({
-              text: item.str,
+              text: groupedText,
               x: item.transform[4],
               y: pageHeight - item.transform[5],
-              width: item.width || 0,
+              width: groupedWidth,
               height: item.height || item.transform[3] || 12,
               page: pageNumber,
             });
           }
+          index = index + groupingIndex + 1;
         }
 
         return '';
@@ -328,32 +372,38 @@ export class CreditCardStatementService {
 
     const mainCreditCardNumberMatch = new RegExp(/\d{4}(?=\D*$)/).exec(mainCreditCard);
     if (!mainCreditCardNumberMatch) {
-      throw new HttpException('Could not extract main credit card number', HttpStatus.UNPROCESSABLE_ENTITY);
+      throw new HttpException(
+        'No se pudo extraer el número de tarjeta de crédito principal',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
     }
 
     const billingPeriodMatch = billingPeriodStartEnd.match(/\d{2}-\d{2}-\d{4}/g);
     if (!billingPeriodMatch) {
-      throw new HttpException('Could not extract billing period dates', HttpStatus.UNPROCESSABLE_ENTITY);
+      throw new HttpException('No se pudo extraer el período facturado', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
     const dueDateMatch = new RegExp(/\d{2}\/\d{2}\/\d{4}/).exec(dueDateText);
     if (!dueDateMatch) {
-      throw new HttpException('Could not extract due date', HttpStatus.UNPROCESSABLE_ENTITY);
+      throw new HttpException('No se pudo extraer la fecha de vencimiento', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
     const dueAmountMatch = new RegExp(/\$\s*(-?[\d.,]+)/).exec(dueAmountText);
     if (!dueAmountMatch) {
-      throw new HttpException('Could not extract due amount', HttpStatus.UNPROCESSABLE_ENTITY);
+      throw new HttpException('No se pudo extraer el monto a pagar', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
     const minimumPaymentMatch = new RegExp(/\$\s*(-?[\d.,]+)/).exec(minimumPaymentCoordinatesText);
     if (!minimumPaymentMatch) {
-      throw new HttpException('Could not extract minimum payment amount', HttpStatus.UNPROCESSABLE_ENTITY);
+      throw new HttpException('No se pudo extraer el pago mínimo', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
     const previousStatementDebtMatch = new RegExp(/\$\s*(-?[\d.,]+)/).exec(previousStatementDebtCoordinatesText);
     if (!previousStatementDebtMatch) {
-      throw new HttpException('Could not extract previous statement debt amount', HttpStatus.UNPROCESSABLE_ENTITY);
+      throw new HttpException(
+        'No se pudo extraer el monto de la deuda del estado de cuenta anterior',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
     }
 
     const creditCardId = await this.paymentMethodService.getIdByName(mainCreditCardNumberMatch[0]);
@@ -369,7 +419,7 @@ export class CreditCardStatementService {
     });
 
     if (checkRepeatedStatement) {
-      throw new HttpException('Statement already exists', HttpStatus.NOT_ACCEPTABLE);
+      throw new HttpException('Estado de cuenta ya existe', HttpStatus.NOT_ACCEPTABLE);
     }
 
     // Extract totals
@@ -526,17 +576,17 @@ export class CreditCardStatementService {
 
     if (parsedTotalOperations !== totalCalculatedOperations) {
       throw new HttpException(
-        `Parsed operations do not match parsed value: ${parsedTotalOperations} !== ${totalCalculatedOperations}`,
+        `Operaciones parseadas no coinciden con el total parseado: ${parsedTotalOperations} !== ${totalCalculatedOperations}`,
         HttpStatus.UNPROCESSABLE_ENTITY,
       );
     } else if (parsedTotalCharges !== totalCharges) {
       throw new HttpException(
-        `Parsed charges do not match parsed value: ${parsedTotalCharges} !== ${totalCharges}`,
+        `Los cargos parseados no coinciden con el total parseado: ${parsedTotalCharges} !== ${totalCharges}`,
         HttpStatus.UNPROCESSABLE_ENTITY,
       );
     } else if (parsedTotalUnbilledInstallments !== totalUnbilledInstallments) {
       throw new HttpException(
-        `Parsed unbilled installments do not match parsed value: ${parsedTotalUnbilledInstallments} !== ${totalUnbilledInstallments}`,
+        `Los cargos no facturados parseados no coinciden con el total parseado: ${parsedTotalUnbilledInstallments} !== ${totalUnbilledInstallments}`,
         HttpStatus.UNPROCESSABLE_ENTITY,
       );
     }
@@ -577,7 +627,7 @@ export class CreditCardStatementService {
   private parseAmount(amountStr: string): number {
     // Remove currency symbols, spaces, thousand separators, and convert Chilean decimal format
     // Chilean format: 1.234.567,89 or -1.234.567,89
-    return parseFloat(amountStr.replace(/[$\s.,]/g, (match) => (match === ',' ? '.' : '')));
+    return Number.parseFloat(amountStr.replace(/[$\s.,]/g, (match) => (match === ',' ? '.' : '')));
   }
 
   private addTransactionToCategory(
@@ -606,7 +656,13 @@ export class CreditCardStatementService {
     const outputPath = filePath ? `${filePath}/${fileName}` : path.join(process.cwd(), fileName);
 
     if (!this.creditCardStatementPDF) {
-      this.creditCardStatementPDF = await PDFDocument.load(file.buffer);
+      try {
+        this.creditCardStatementPDF = await PDFDocument.load(file.buffer);
+      } catch (error) {
+        if (error.message.includes('encrypted') || error.message.includes('password')) {
+          throw new HttpException('Pdf con contraseña no es soportado', HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+      }
     }
     const pdfDoc = this.creditCardStatementPDF;
     const pages = pdfDoc.getPages();
