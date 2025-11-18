@@ -10,8 +10,8 @@ export class PaymentMethodsService {
     private readonly paymentMethodRepository: Repository<PaymentMethod>,
   ) {}
 
-  async getIdByName(name: string): Promise<string> {
-    const paymentMethod = await this.paymentMethodRepository.findOneOrFail({ select: { id: true }, where: { name } });
-    return paymentMethod.id;
+  async getIdByName(name: string): Promise<PaymentMethod | null> {
+    const paymentMethod = await this.paymentMethodRepository.findOne({ select: { id: true }, where: { name } });
+    return paymentMethod;
   }
 }

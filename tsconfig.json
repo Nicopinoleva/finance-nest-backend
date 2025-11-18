@@ -24,6 +24,8 @@
       "@modules/*": ["src/modules/*"],
       "@entities": ["src/database/entities"],
       "@entities/*": ["src/database/entities/*"],
+      "@utils": ["src/utils"],
+      "@utils/*": ["src/utils/*"]
     }
   }
 }

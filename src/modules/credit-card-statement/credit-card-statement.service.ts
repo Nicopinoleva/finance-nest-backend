@@ -1,11 +1,7 @@
 import { HttpException, HttpStatus, Injectable, Scope } from '@nestjs/common';
-import PdfParse from 'pdf-parse-new';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
-import type { PDFPageProxy } from 'pdfjs-dist';
-import { TextItem } from 'pdfjs-dist/types/src/display/api';
-import { CreditCardStatementBanks, removeAccents } from 'src/utils';
 import {
   CutRegion,
   ParsedStatement,
@@ -23,6 +19,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { PaymentMethodsService } from '@modules/payment-methods/payment-methods/payment-methods.service';
 import { Transactional, TransactionHost } from '@nestjs-cls/transactional';
 import { TransactionalAdapterTypeOrm } from '@nestjs-cls/transactional-adapter-typeorm';
+import { CreditCardStatementBanks, extractTextFromCoordinates, findTextCoordinates, normalizeDateString } from '@utils';
 
 @Injectable({ scope: Scope.REQUEST })
 export class CreditCardStatementService {
@@ -50,22 +47,58 @@ export class CreditCardStatementService {
     renderDebugPdf?: boolean,
     filePath?: string,
   ): Promise<ParsedStatement> {
+    if (!this.creditCardStatementPDF) {
+      try {
+        this.creditCardStatementPDF = await PDFDocument.load(file.buffer);
+      } catch (error) {
+        if (error.message.includes('encrypted') || error.message.includes('password')) {
+          throw new HttpException('Pdf con contraseña no es soportado', HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+      }
+    }
     if (bankToParse === CreditCardStatementBanks.BancoDeChile) {
       // TODO: make this one call to run throw pdf only once(check if possible with legacy pdfs, seem that they are not ordered)
-      this.mainCreditCardTextCoordinates = await this.findTextCoordinates(file, 'n° de tarjeta de credito');
-      this.billingPeriodStartEndCoordinates = await this.findTextCoordinates(file, 'periodo facturado');
-      this.dueDateCoordinates = await this.findTextCoordinates(file, 'pagar hasta');
-      this.dueAmountCoordinates = await this.findTextCoordinates(file, 'monto total facturado a pagar');
-      this.minimumPaymentCoordinates = await this.findTextCoordinates(file, 'monto minimo a pagar');
-      this.previousStatementDebtCoordinates = await this.findTextCoordinates(
+      this.mainCreditCardTextCoordinates = await findTextCoordinates(
+        file,
+        'n° de tarjeta de credito',
+        this.creditCardStatementPDF,
+      );
+      this.billingPeriodStartEndCoordinates = await findTextCoordinates(
+        file,
+        'periodo facturado',
+        this.creditCardStatementPDF,
+      );
+      this.dueDateCoordinates = await findTextCoordinates(file, 'pagar hasta', this.creditCardStatementPDF, false);
+      this.dueAmountCoordinates = await findTextCoordinates(
+        file,
+        'monto total facturado a pagar',
+        this.creditCardStatementPDF,
+      );
+      this.minimumPaymentCoordinates = await findTextCoordinates(
+        file,
+        'monto minimo a pagar',
+        this.creditCardStatementPDF,
+      );
+      this.previousStatementDebtCoordinates = await findTextCoordinates(
         file,
         'saldo adeudado final periodo anterior',
+        this.creditCardStatementPDF,
       );
-      this.transactionsTableCoordinates = await this.findTextCoordinates(file, '2. periodo actual', false);
-      this.transactionsEndCoordinates = await this.findTextCoordinates(file, 'iii. informacion de pago');
-      this.unbilledStatementsTableStartCoordinates = await this.findTextCoordinates(
+      this.transactionsTableCoordinates = await findTextCoordinates(
+        file,
+        '2. periodo actual',
+        this.creditCardStatementPDF,
+        false,
+      );
+      this.transactionsEndCoordinates = await findTextCoordinates(
+        file,
+        'iii. informacion de pago',
+        this.creditCardStatementPDF,
+      );
+      this.unbilledStatementsTableStartCoordinates = await findTextCoordinates(
         file,
         '4. informacion compras en cuotas',
+        this.creditCardStatementPDF,
       );
     }
 
@@ -91,46 +124,58 @@ export class CreditCardStatementService {
     const pages = pdfDoc.getPages();
 
     // TODO: Maybe its possible to extract all text in one sweep instead of multiple calls
-    const mainCreditCardText = await this.extractTextFromCoordinates(
+    const mainCreditCardText = await extractTextFromCoordinates(
       file.buffer,
       this.mainCreditCardTextCoordinates[0].page,
+      this.creditCardStatementPDF,
       Math.trunc(this.mainCreditCardTextCoordinates[0].y),
-      Math.trunc(this.mainCreditCardTextCoordinates[0].y + this.mainCreditCardTextCoordinates[0].height),
+      Math.trunc(this.mainCreditCardTextCoordinates[0].y + this.mainCreditCardTextCoordinates[0].height - 3),
     );
 
-    const billingPeriodStartEndText = await this.extractTextFromCoordinates(
+    const billingPeriodStartEndText = await extractTextFromCoordinates(
       file.buffer,
       this.billingPeriodStartEndCoordinates[0].page,
+      this.creditCardStatementPDF,
       Math.trunc(this.billingPeriodStartEndCoordinates[0].y),
       Math.trunc(this.billingPeriodStartEndCoordinates[0].y + this.billingPeriodStartEndCoordinates[0].height),
       Math.trunc(this.billingPeriodStartEndCoordinates[0].x + this.billingPeriodStartEndCoordinates[0].width + 15),
       Math.trunc(this.billingPeriodStartEndCoordinates[0].x + this.billingPeriodStartEndCoordinates[0].width + 90),
     );
 
-    const dueDateText = await this.extractTextFromCoordinates(
-      file.buffer,
-      this.dueDateCoordinates[0].page,
-      Math.trunc(this.dueDateCoordinates[0].y + 10),
-      Math.trunc(this.dueDateCoordinates[0].y + this.dueDateCoordinates[0].height + 10),
-    );
+    const dueDateTexts: string[] = [];
 
-    const dueAmountText = await this.extractTextFromCoordinates(
+    for (const [_, coord] of this.dueDateCoordinates.entries()) {
+      dueDateTexts.push(
+        await extractTextFromCoordinates(
+          file.buffer,
+          coord.page,
+          this.creditCardStatementPDF,
+          Math.trunc(coord.y + 10),
+          Math.trunc(coord.y + coord.height + 10),
+        ),
+      );
+    }
+
+    const dueAmountText = await extractTextFromCoordinates(
       file.buffer,
       this.dueAmountCoordinates[0].page,
+      this.creditCardStatementPDF,
       Math.trunc(this.dueAmountCoordinates[0].y),
       Math.trunc(this.dueAmountCoordinates[0].y + this.dueAmountCoordinates[0].height + 10),
     );
 
-    const minimumPaymentCoordinatesText = await this.extractTextFromCoordinates(
+    const minimumPaymentCoordinatesText = await extractTextFromCoordinates(
       file.buffer,
       this.minimumPaymentCoordinates[0].page,
+      this.creditCardStatementPDF,
       Math.trunc(this.minimumPaymentCoordinates[0].y),
       Math.trunc(this.minimumPaymentCoordinates[0].y + this.minimumPaymentCoordinates[0].height + 10),
     );
 
-    const previousStatementDebtCoordinatesText = await this.extractTextFromCoordinates(
+    const previousStatementDebtCoordinatesText = await extractTextFromCoordinates(
       file.buffer,
       this.previousStatementDebtCoordinates[0].page,
+      this.creditCardStatementPDF,
       Math.trunc(this.previousStatementDebtCoordinates[0].y),
       Math.trunc(this.previousStatementDebtCoordinates[0].y + this.previousStatementDebtCoordinates[0].height + 10),
       Math.trunc(this.previousStatementDebtCoordinates[0].x + this.previousStatementDebtCoordinates[0].width + 100),
@@ -151,9 +196,10 @@ export class CreditCardStatementService {
         this.transactionsEndCoordinates[0],
       );
 
-      const regionText = await this.extractTextFromCoordinates(
+      const regionText = await extractTextFromCoordinates(
         file.buffer,
         item.page,
+        this.creditCardStatementPDF,
         item.y + bounds.top,
         pageHeight - bounds.bottom,
       );
@@ -162,205 +208,26 @@ export class CreditCardStatementService {
     }
 
     return this.parseTransactionText(
-      mainCreditCardText,
-      billingPeriodStartEndText,
-      dueDateText,
-      dueAmountText,
-      minimumPaymentCoordinatesText,
-      previousStatementDebtCoordinatesText,
+      [mainCreditCardText],
+      [billingPeriodStartEndText],
+      dueDateTexts,
+      [dueAmountText],
+      [minimumPaymentCoordinatesText],
+      [previousStatementDebtCoordinatesText],
       allTransactionsText.join('\n'),
     );
-  }
-
-  /**
-   * Calculate the top and bottom bounds for a region based on page position
-   */
-  private calculateRegionBounds(
-    currentPage: number,
-    lastPage: number,
-    pageHeight: number,
-    endCoordinates: TransactionsCoordinates,
-  ): RegionBounds {
-    let bottom = 0;
-    let top = 0;
-
-    if (currentPage === 0) {
-      // For Banco de Chile, footer text appears ~200 points from bottom on first page
-      bottom = 200;
-    } else if (currentPage === lastPage) {
-      // For Banco de Chile, on the last transaction page, stop above the "III. INFORMACIÓN DE PAGO" section with 50 padding
-      bottom = pageHeight - (endCoordinates.y + endCoordinates.height) + 50;
-    }
-    if (currentPage !== 0) {
-      // For Banco de Chile, on intermediate pages, add 50 padding at top to remove repeated headers
-      top = 45;
-    }
-
-    return { bottom, top };
-  }
-
-  async findTextCoordinates(
-    file: Express.Multer.File,
-    searchText: string,
-    stopAtFirstMatch = true,
-  ): Promise<TransactionsCoordinates[]> {
-    const pdfBuffer = file.buffer;
-    const textItems: TransactionsCoordinates[] = [];
-
-    if (!this.creditCardStatementPDF) {
-      try {
-        this.creditCardStatementPDF = await PDFDocument.load(file.buffer);
-      } catch (error) {
-        if (error.message.includes('encrypted') || error.message.includes('password')) {
-          throw new HttpException('Pdf con contraseña no es soportado', HttpStatus.UNPROCESSABLE_ENTITY);
-        }
-      }
-    }
-
-    const pages = this.creditCardStatementPDF.getPages();
-    const pageSizes = pages.map((page) => page.getSize());
-
-    const options = {
-      pagerender: async (pageData: PDFPageProxy) => {
-        // Skip processing if we already found a result and should stop
-        if (stopAtFirstMatch && textItems.length > 0) {
-          return '';
-        }
-
-        const pageNumber = pageData._pageIndex;
-        const pageHeight = pageSizes[pageNumber]?.height || 792;
-        const textContent = await pageData.getTextContent();
-
-        const items = textContent.items as TextItem[];
-        let index = 0;
-
-        while (index < items.length) {
-          // Skip processing if we already found a result and should stop
-          if (stopAtFirstMatch && textItems.length > 0) {
-            break;
-          }
-
-          const item = items[index];
-
-          let groupingIndex = 0;
-
-          let groupedText = '';
-          let groupedWidth = 0;
-          while (groupingIndex <= items.length) {
-            const firstCharacterItem = items[index + groupingIndex];
-            if (groupedText === '') {
-              groupedText += firstCharacterItem.str;
-              groupedWidth += firstCharacterItem.width || 0;
-            }
-            const nextItem = textContent.items[index + groupingIndex + 1] as TextItem;
-            if (
-              nextItem &&
-              // x
-              Math.abs(nextItem.transform[4] - firstCharacterItem.transform[4]) < 7 &&
-              // y
-              Math.abs(nextItem.transform[5] - firstCharacterItem.transform[5]) < 7
-            ) {
-              groupedText += nextItem.str;
-              groupedWidth += nextItem.width || 0;
-              groupingIndex++;
-            } else {
-              break;
-            }
-          }
-          if (removeAccents(groupedText.toLowerCase()).includes(searchText)) {
-            textItems.push({
-              text: groupedText,
-              x: item.transform[4],
-              y: pageHeight - item.transform[5],
-              width: groupedWidth,
-              height: item.height || item.transform[3] || 12,
-              page: pageNumber,
-            });
-          }
-          index = index + groupingIndex + 1;
-        }
-
-        return '';
-      },
-    };
-
-    await PdfParse(pdfBuffer, options);
-    return textItems;
-  }
-
-  async extractTextFromCoordinates(
-    pdfBuffer: Buffer,
-    pageNumber: number,
-    startY: number,
-    endY: number,
-    startX?: number,
-    endX?: number,
-  ): Promise<string> {
-    if (!this.creditCardStatementPDF) {
-      this.creditCardStatementPDF = await PDFDocument.load(pdfBuffer);
-    }
-    const pages = this.creditCardStatementPDF.getPages();
-    const pageHeight = pages[pageNumber].getSize().height;
-
-    const options = {
-      pagerender: async (pageData: PDFPageProxy) => {
-        // Only process the specified page
-        if (pageData._pageIndex !== pageNumber) {
-          return '';
-        }
-
-        const textContent = await pageData.getTextContent();
-        const textItems: Array<{ text: string; y: number; x: number }> = [];
-
-        for (const item of textContent.items as TextItem[]) {
-          // Top to bottom conversion
-          const y = Math.trunc(pageHeight - item.transform[5]);
-
-          // Only include text within region
-          if (startX !== undefined && endX !== undefined) {
-            const x = Math.trunc(item.transform[4]);
-            if (x >= startX && x <= endX && y >= startY && y <= endY) {
-              textItems.push({
-                text: item.str,
-                y: y,
-                x: x,
-              });
-            }
-          } else if (y >= startY && y <= endY) {
-            textItems.push({
-              text: item.str,
-              y: y,
-              x: item.transform[4],
-            });
-          }
-        }
-
-        // Sort by y position (top to bottom) then x position (left to right)
-        textItems.sort((a, b) => {
-          const yDiff = a.y - b.y;
-          if (Math.abs(yDiff) < 5) return a.x - b.x; // Same line
-          return yDiff;
-        });
-        // TODO: This could be skipped
-        return textItems.map((item) => item.text).join(' ');
-      },
-    };
-
-    // This parses the pdf only on the specified regions
-    const data = await PdfParse(pdfBuffer, options);
-    return data.text;
   }
 
   // TODO: Atomize to smaller functions
   @Transactional()
   async parseTransactionText(
-    mainCreditCard: string,
-    billingPeriodStartEnd: string,
-    dueDateText: string,
-    dueAmountText: string,
-    minimumPaymentCoordinatesText: string,
-    previousStatementDebtCoordinatesText: string,
-    text: string,
+    mainCreditCard: string[],
+    billingPeriodStartEnd: string[],
+    dueDateText: string[],
+    dueAmountText: string[],
+    minimumPaymentCoordinatesText: string[],
+    previousStatementDebtCoordinatesText: string[],
+    allTransactionsText: string,
   ): Promise<ParsedStatement> {
     const transactionsMap: Map<string, TransactionCategory> = new Map();
     let totalPayments = 0;
@@ -370,7 +237,21 @@ export class CreditCardStatementService {
     let totalCharges = 0;
     let totalUnbilledInstallments = 0;
 
-    const mainCreditCardNumberMatch = new RegExp(/\d{4}(?=\D*$)/).exec(mainCreditCard);
+    let mainCreditCardNumberMatch: RegExpExecArray | null = null;
+    let billingPeriodMatchStartEnd: RegExpMatchArray | null = null;
+    let dueDateMatch: RegExpExecArray | null = null;
+    let dueAmountMatch: RegExpExecArray | null = null;
+    let minimumPaymentMatch: RegExpExecArray | null = null;
+    let previousStatementDebtMatch: RegExpExecArray | null = null;
+
+    for (const text of mainCreditCard) {
+      const match = new RegExp(/\d{4}(?=\D*$)/).exec(text);
+      if (match) {
+        mainCreditCardNumberMatch = match;
+        break;
+      }
+    }
+
     if (!mainCreditCardNumberMatch) {
       throw new HttpException(
         'No se pudo extraer el número de tarjeta de crédito principal',
@@ -378,27 +259,59 @@ export class CreditCardStatementService {
       );
     }
 
-    const billingPeriodMatch = billingPeriodStartEnd.match(/\d{2}-\d{2}-\d{4}/g);
-    if (!billingPeriodMatch) {
+    for (const text of billingPeriodStartEnd) {
+      const match = text.match(/\d{2}[-/]\d{2}[-/]\d{4}/g);
+      if (match) {
+        billingPeriodMatchStartEnd = match;
+        break;
+      }
+    }
+
+    if (!billingPeriodMatchStartEnd) {
       throw new HttpException('No se pudo extraer el período facturado', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
-    const dueDateMatch = new RegExp(/\d{2}\/\d{2}\/\d{4}/).exec(dueDateText);
+    for (const text of dueDateText) {
+      const match = new RegExp(/\d{2}\/\d{2}\/\d{4}/).exec(text);
+      if (match) {
+        dueDateMatch = match;
+        break;
+      }
+    }
+
     if (!dueDateMatch) {
       throw new HttpException('No se pudo extraer la fecha de vencimiento', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
-    const dueAmountMatch = new RegExp(/\$\s*(-?[\d.,]+)/).exec(dueAmountText);
+    for (const text of dueAmountText) {
+      const match = new RegExp(/\$\s*(-?[\d.,]+)/).exec(text);
+      if (match) {
+        dueAmountMatch = match;
+        break;
+      }
+    }
     if (!dueAmountMatch) {
       throw new HttpException('No se pudo extraer el monto a pagar', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
-    const minimumPaymentMatch = new RegExp(/\$\s*(-?[\d.,]+)/).exec(minimumPaymentCoordinatesText);
+    for (const text of minimumPaymentCoordinatesText) {
+      const match = new RegExp(/\$\s*(-?[\d.,]+)/).exec(text);
+      if (match) {
+        minimumPaymentMatch = match;
+        break;
+      }
+    }
     if (!minimumPaymentMatch) {
       throw new HttpException('No se pudo extraer el pago mínimo', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
-    const previousStatementDebtMatch = new RegExp(/\$\s*(-?[\d.,]+)/).exec(previousStatementDebtCoordinatesText);
+    for (const text of previousStatementDebtCoordinatesText) {
+      const match = new RegExp(/\s*(-?[\d.,]+)/).exec(text);
+      if (match) {
+        previousStatementDebtMatch = match;
+        break;
+      }
+    }
     if (!previousStatementDebtMatch) {
       throw new HttpException(
         'No se pudo extraer el monto de la deuda del estado de cuenta anterior',
@@ -406,13 +319,26 @@ export class CreditCardStatementService {
       );
     }
 
-    const creditCardId = await this.paymentMethodService.getIdByName(mainCreditCardNumberMatch[0]);
-    const billingPeriodStart = parse(billingPeriodMatch[0], 'dd-MM-yyyy', new Date());
-    const billingPeriodEnd = parse(billingPeriodMatch[1], 'dd-MM-yyyy', new Date());
+    if (!previousStatementDebtMatch) {
+      throw new HttpException(
+        'No se pudo extraer el monto de la deuda del estado de cuenta anterior',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    const creditCard = await this.paymentMethodService.getIdByName(mainCreditCardNumberMatch[0]);
+    if (!creditCard) {
+      throw new HttpException(
+        `Tarjeta de crédito terminada en "${mainCreditCardNumberMatch[0]}" no encontrada.`,
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    const billingPeriodStart = parse(normalizeDateString(billingPeriodMatchStartEnd[0]), 'dd-MM-yyyy', new Date());
+    const billingPeriodEnd = parse(normalizeDateString(billingPeriodMatchStartEnd[1]), 'dd-MM-yyyy', new Date());
 
     const checkRepeatedStatement = await this.creditCardStatementRepository.exists({
       where: {
-        creditCardId: creditCardId,
+        creditCardId: creditCard.id,
         billingPeriodStart: billingPeriodStart,
         billingPeriodEnd: billingPeriodEnd,
       },
@@ -422,34 +348,81 @@ export class CreditCardStatementService {
       throw new HttpException('Estado de cuenta ya existe', HttpStatus.NOT_ACCEPTABLE);
     }
 
-    // Extract totals
-    const totalOperationsMatch = new RegExp(/TOTAL OPERACIONES[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-    const totalPaymentsMatch = new RegExp(/TOTAL PAGOS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-    const totalPATMatch = new RegExp(/TOTAL PAT A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-    const totalInstallmentsMatch = new RegExp(/TOTAL COMPRAS EN CUOTAS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-    const totalChargesMatch = new RegExp(/CARGOS, COMISIONES[^$]*\$\s*(-?[\d.,]+)/).exec(text);
+    const totalPaymentsMatch = new RegExp(/TOTAL PAGOS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(allTransactionsText);
+
+    const totalPATMatch = new RegExp(/TOTAL PAT A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(allTransactionsText);
+
+    let totalInstallmentsMatch: RegExpExecArray | null = null;
+    const totalInstallmentsRegexes = [
+      /TOTAL COMPRAS EN CUOTAS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/,
+      /TOTAL TRANSACCIONES EN CUOTAS [^$]*\$\s*(-?[\d.,]+)/,
+    ];
+    for (const regex of totalInstallmentsRegexes) {
+      const match = regex.exec(allTransactionsText);
+      if (match) {
+        totalInstallmentsMatch = match;
+        break;
+      }
+    }
+
+    if (!totalInstallmentsMatch) {
+      throw new HttpException('No se pudo extraer el total de compras en cuotas', HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    // In banco de chile, in the new format, the total are at the end of the tables. To identify the charges table, we first find the start of the table
+    const totalChargesTableStartMatch = new RegExp(/CARGOS, COMISIONES[^$]*\$\s*(-?[\d.,]+)/).exec(allTransactionsText);
+    if (!totalChargesTableStartMatch) {
+      throw new HttpException('No se pudo extraer el total de cargos y comisiones', HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    // Now we look for the total charges after that point
+    let totalChargesMatch: RegExpExecArray | null = null;
+    const totalChargesRegexes = [
+      /TOTAL CARGOS, COMISIONES, IMPUESTOS Y ABONOS[^$]*\$\s*(-?[\d.,]+)/,
+      /CARGOS, COMISIONES[^$]*\$\s*(-?[\d.,]+)/,
+    ];
+
+    for (const regex of totalChargesRegexes) {
+      const match = regex.exec(allTransactionsText);
+      if (match) {
+        totalChargesMatch = match;
+        break;
+      }
+    }
+
+    if (!totalChargesMatch) {
+      throw new HttpException('No se pudo extraer el total de cargos y comisiones', HttpStatus.UNPROCESSABLE_ENTITY);
+    }
     const totalUnbilledInstallmentsMatch = new RegExp(/4.INFORMACION COMPRAS EN CUOTAS[^$]*\$\s*(-?[\d.,]+)/).exec(
-      text,
+      allTransactionsText,
     );
 
-    const parsedTotalOperations = totalOperationsMatch ? this.parseAmount(totalOperationsMatch[1]) : 0;
-    const parsedTotalCharges = totalChargesMatch ? this.parseAmount(totalChargesMatch[1]) : 0;
-    const parsedTotalUnbilledInstallments = totalUnbilledInstallmentsMatch
-      ? this.parseAmount(totalUnbilledInstallmentsMatch[1])
-      : 0;
-
     // To identify multiple cards
-    const cardTotalPattern = /TOTAL TARJETA (X+\d{4})[^$]*\$\s*(-?[\d.,]+)/g;
-
-    const referenceMatches = text.matchAll(cardTotalPattern);
+    const cardTotalPattern = /TOTAL TARJETA ([X\s-]+?\d{4})[^$]*\$\s*(-?[\d.,]+)/g;
+    const referenceMatches = allTransactionsText.matchAll(cardTotalPattern);
     const creditCardsMatches = Array.from(referenceMatches).map((match) => ({
       reference: match[1],
       parsedTotal: this.parseAmount(match[2]),
       index: match.index,
     }));
 
+    if (creditCardsMatches.length === 0) {
+      throw new HttpException('No se pudo extraer el total de tarjetas de crédito', HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+
     // Sort credit cards by their position in text
     creditCardsMatches.sort((a, b) => a.index - b.index);
+
+    const parsedTotalOperations =
+      (totalPaymentsMatch ? this.parseAmount(totalPaymentsMatch[1]) : 0) +
+      (totalPATMatch ? this.parseAmount(totalPATMatch[1]) : 0) +
+      creditCardsMatches.reduce((sum, card) => sum + card.parsedTotal, 0) +
+      this.parseAmount(totalInstallmentsMatch[1]);
+
+    const parsedTotalCharges = this.parseAmount(totalChargesMatch[1]);
+    const parsedTotalUnbilledInstallments = totalUnbilledInstallmentsMatch
+      ? this.parseAmount(totalUnbilledInstallmentsMatch[1])
+      : 0;
 
     const location = String.raw`([A-Z]+(?:\s+[A-Z]+)*)?`; // Uppercase words with spaces, optional
     const date = String.raw`\d{2}/\d{2}/\d{2}`; // DD/MM/YY
@@ -473,7 +446,7 @@ export class CreditCardStatementService {
       'g',
     );
 
-    const transactionMatches = text.matchAll(transactionPattern);
+    const transactionMatches = allTransactionsText.matchAll(transactionPattern);
 
     for (const match of transactionMatches) {
       const [, location, date, code, description, operationAmount, totalAmount, installments, monthlyAmount] = match;
@@ -560,7 +533,7 @@ export class CreditCardStatementService {
             parsedMonthlyAmount,
           );
         }
-      } else if (totalChargesMatch && totalChargesMatch.index < transactionIndex) {
+      } else if (totalChargesTableStartMatch && totalChargesTableStartMatch.index < transactionIndex) {
         // Charges do not have end total, so we assume they appear after all cards
         totalCharges += parsedMonthlyAmount;
         this.addTransactionToCategory(
@@ -592,7 +565,7 @@ export class CreditCardStatementService {
     }
 
     const parsedStatement = await this.txHost.tx.save(CreditCardStatement, {
-      creditCardId: creditCardId,
+      creditCardId: creditCard.id,
       billingPeriodStart: billingPeriodStart,
       billingPeriodEnd: billingPeriodEnd,
       dueDate: parse(dueDateMatch[0], 'dd/MM/yyyy', new Date()),
@@ -646,6 +619,33 @@ export class CreditCardStatementService {
       category.parsedTotal = parsedTotalAmount;
       category.calculatedTotal += parsedMonthlyAmount;
     }
+  }
+
+  /**
+   * Calculate the top and bottom bounds for a region based on page position
+   */
+  private calculateRegionBounds(
+    currentPage: number,
+    lastPage: number,
+    pageHeight: number,
+    endCoordinates: TransactionsCoordinates,
+  ): RegionBounds {
+    let bottom = 0;
+    let top = 0;
+
+    if (currentPage === 0) {
+      // For Banco de Chile, footer text appears ~200 points from bottom on first page
+      bottom = 200;
+    } else if (currentPage === lastPage) {
+      // For Banco de Chile, on the last transaction page, stop above the "III. INFORMACIÓN DE PAGO" section with 50 padding
+      bottom = pageHeight - (endCoordinates.y + endCoordinates.height) + 50;
+    }
+    if (currentPage !== 0) {
+      // For Banco de Chile, on intermediate pages, add 50 padding at top to remove repeated headers
+      top = 45;
+    }
+
+    return { bottom, top };
   }
 
   /**
