@@ -1,6 +1,7 @@
 import { BankAccountType } from './banks/bank-account-type.entity';
 import { BankAccount } from './banks/bank-account.entity';
 import { Banks } from './banks/banks.entity';
+import { CreditCardAccount } from './credit-card-statement/credit-card-account.entity';
 import { CreditCardStatementReference } from './credit-card-statement/credit-card-statement-reference.entity';
 import { CreditCardStatement } from './credit-card-statement/credit-card-statement.entity';
 import { ExpenseType } from './expenses/expense-type.entity';
@@ -24,6 +25,7 @@ export const entities = [
   Users,
   CreditCardStatement,
   CreditCardStatementReference,
+  CreditCardAccount,
 ];
 
 export {
@@ -39,4 +41,5 @@ export {
   Users,
   CreditCardStatement,
   CreditCardStatementReference,
+  CreditCardAccount,
 };

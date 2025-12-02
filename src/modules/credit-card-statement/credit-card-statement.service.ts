@@ -20,6 +20,7 @@ import { PaymentMethodsService } from '@modules/payment-methods/payment-methods/
 import { Transactional, TransactionHost } from '@nestjs-cls/transactional';
 import { TransactionalAdapterTypeOrm } from '@nestjs-cls/transactional-adapter-typeorm';
 import { CreditCardStatementBanks, extractTextFromCoordinates, findTextCoordinates, normalizeDateString } from '@utils';
+import { PaymentMethod } from '@entities';
 
 @Injectable({ scope: Scope.REQUEST })
 export class CreditCardStatementService {
@@ -178,8 +179,8 @@ export class CreditCardStatementService {
       this.creditCardStatementPDF,
       Math.trunc(this.previousStatementDebtCoordinates[0].y),
       Math.trunc(this.previousStatementDebtCoordinates[0].y + this.previousStatementDebtCoordinates[0].height + 10),
-      Math.trunc(this.previousStatementDebtCoordinates[0].x + this.previousStatementDebtCoordinates[0].width + 100),
-      Math.trunc(this.previousStatementDebtCoordinates[0].x + this.previousStatementDebtCoordinates[0].width + 160),
+      Math.trunc(this.previousStatementDebtCoordinates[0].x + this.previousStatementDebtCoordinates[0].width + 70),
+      Math.trunc(this.previousStatementDebtCoordinates[0].x + this.previousStatementDebtCoordinates[0].width + 130),
     );
 
     const allTransactionsText: string[] = [];
@@ -319,15 +320,26 @@ export class CreditCardStatementService {
       );
     }
 
-    if (!previousStatementDebtMatch) {
-      throw new HttpException(
-        'No se pudo extraer el monto de la deuda del estado de cuenta anterior',
-        HttpStatus.UNPROCESSABLE_ENTITY,
-      );
+    const creditCards = await this.txHost.tx.find(PaymentMethod, {
+      select: {
+        id: true,
+        name: true,
+      },
+      where: {
+        createdById: 'c3983079-8ad2-4057-aa26-5418e1003563',
+      },
+    });
+
+    const creditCardsMap = new Map<string, PaymentMethod>();
+    for (const card of creditCards) {
+      if (!creditCardsMap.has(card.name)) {
+        creditCardsMap.set(card.name, card);
+      }
     }
 
-    const creditCard = await this.paymentMethodService.getIdByName(mainCreditCardNumberMatch[0]);
-    if (!creditCard) {
+    const mainCreditCardId = creditCardsMap.get(mainCreditCardNumberMatch[0])?.id;
+
+    if (!mainCreditCardId) {
       throw new HttpException(
         `Tarjeta de crédito terminada en "${mainCreditCardNumberMatch[0]}" no encontrada.`,
         HttpStatus.NOT_FOUND,
@@ -338,7 +350,7 @@ export class CreditCardStatementService {
 
     const checkRepeatedStatement = await this.creditCardStatementRepository.exists({
       where: {
-        creditCardId: creditCard.id,
+        creditCardId: mainCreditCardId,
         billingPeriodStart: billingPeriodStart,
         billingPeriodEnd: billingPeriodEnd,
       },
@@ -365,17 +377,19 @@ export class CreditCardStatementService {
       }
     }
 
-    if (!totalInstallmentsMatch) {
-      throw new HttpException('No se pudo extraer el total de compras en cuotas', HttpStatus.UNPROCESSABLE_ENTITY);
-    }
-
-    // In banco de chile, in the new format, the total are at the end of the tables. To identify the charges table, we first find the start of the table
-    const totalChargesTableStartMatch = new RegExp(/CARGOS, COMISIONES[^$]*\$\s*(-?[\d.,]+)/).exec(allTransactionsText);
+    // In banco de chile, in the new format, the totals are at the end of the tables. To identify the charges table, we first find the start of the table
+    const totalChargesTableStartMatch = new RegExp(/3.CARGOS, COMISIONES, IMPUESTOS Y ABONOS/).exec(
+      allTransactionsText,
+    );
     if (!totalChargesTableStartMatch) {
-      throw new HttpException('No se pudo extraer el total de cargos y comisiones', HttpStatus.UNPROCESSABLE_ENTITY);
+      throw new HttpException(
+        'No se pudo obtener el inicio de la tabla de cargos y comisiones',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
     }
 
-    // Now we look for the total charges after that point
+    // There are two checks for retrocompatibility with previous banco de chile statements formats.
+    // 2nd is for older one
     let totalChargesMatch: RegExpExecArray | null = null;
     const totalChargesRegexes = [
       /TOTAL CARGOS, COMISIONES, IMPUESTOS Y ABONOS[^$]*\$\s*(-?[\d.,]+)/,
@@ -393,22 +407,44 @@ export class CreditCardStatementService {
     if (!totalChargesMatch) {
       throw new HttpException('No se pudo extraer el total de cargos y comisiones', HttpStatus.UNPROCESSABLE_ENTITY);
     }
-    const totalUnbilledInstallmentsMatch = new RegExp(/4.INFORMACION COMPRAS EN CUOTAS[^$]*\$\s*(-?[\d.,]+)/).exec(
+    let totalUnbilledInstallmentsMatch = new RegExp(/4.INFORMACION COMPRAS EN CUOTAS[^$]*\$\s*(-?[\d.,]+)/).exec(
       allTransactionsText,
     );
 
+    if (!totalUnbilledInstallmentsMatch && this.unbilledStatementsTableStartCoordinates.length > 0) {
+      totalUnbilledInstallmentsMatch = new RegExp(/4.INFORMACIÓN COMPRAS EN CUOTAS[^$]*\$\s*(-?[\d.,]+)/).exec(
+        allTransactionsText,
+      );
+    }
+
     // To identify multiple cards
     const cardTotalPattern = /TOTAL TARJETA ([X\s-]+?\d{4})[^$]*\$\s*(-?[\d.,]+)/g;
-    const referenceMatches = allTransactionsText.matchAll(cardTotalPattern);
-    const creditCardsMatches = Array.from(referenceMatches).map((match) => ({
-      reference: match[1],
-      parsedTotal: this.parseAmount(match[2]),
-      index: match.index,
-    }));
+    const cardMatches = allTransactionsText.matchAll(cardTotalPattern);
+    const creditCardsMatches = Array.from(cardMatches).reduce<
+      {
+        number: string;
+        parsedTotal: number;
+        index: number;
+      }[]
+    >((accumulator, match) => {
+      if (creditCardsMap.has(match[1].slice(-4))) {
+        accumulator.push({
+          number: match[1],
+          parsedTotal: this.parseAmount(match[2]),
+          index: match.index,
+        });
+      } else {
+        throw new HttpException(
+          `Tarjeta de crédito terminada en "${match[1]}" no encontrada.`,
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        );
+      }
+      return accumulator;
+    }, []);
 
-    if (creditCardsMatches.length === 0) {
-      throw new HttpException('No se pudo extraer el total de tarjetas de crédito', HttpStatus.UNPROCESSABLE_ENTITY);
-    }
+    // if (creditCardsMatches.length === 0) {
+    //   throw new HttpException('No se pudo extraer el total de tarjetas de crédito', HttpStatus.UNPROCESSABLE_ENTITY);
+    // }
 
     // Sort credit cards by their position in text
     creditCardsMatches.sort((a, b) => a.index - b.index);
@@ -417,7 +453,7 @@ export class CreditCardStatementService {
       (totalPaymentsMatch ? this.parseAmount(totalPaymentsMatch[1]) : 0) +
       (totalPATMatch ? this.parseAmount(totalPATMatch[1]) : 0) +
       creditCardsMatches.reduce((sum, card) => sum + card.parsedTotal, 0) +
-      this.parseAmount(totalInstallmentsMatch[1]);
+      this.parseAmount(totalInstallmentsMatch?.[1] ?? '0');
 
     const parsedTotalCharges = this.parseAmount(totalChargesMatch[1]);
     const parsedTotalUnbilledInstallments = totalUnbilledInstallmentsMatch
@@ -471,6 +507,7 @@ export class CreditCardStatementService {
         totalInstallments: parsedTotalInstallments,
         monthlyAmount: parsedMonthlyAmount,
         reference: '',
+        creditCard: '',
       };
 
       // The totals always appear at the end of the statement, so we can use their position to categorize transactions
@@ -495,7 +532,7 @@ export class CreditCardStatementService {
           if (card.index > transactionIndex) {
             this.addTransactionToCategory(
               transactionsMap,
-              { ...transaction, reference: card.reference },
+              { ...transaction, creditCard: card.number, reference: CreditCardStatementReferencesEnum.TRANSACTION },
               card.parsedTotal,
               parsedMonthlyAmount,
             );
@@ -565,7 +602,7 @@ export class CreditCardStatementService {
     }
 
     const parsedStatement = await this.txHost.tx.save(CreditCardStatement, {
-      creditCardId: creditCard.id,
+      creditCardId: mainCreditCardId,
       billingPeriodStart: billingPeriodStart,
       billingPeriodEnd: billingPeriodEnd,
       dueDate: parse(dueDateMatch[0], 'dd/MM/yyyy', new Date()),
@@ -638,11 +675,11 @@ export class CreditCardStatementService {
       bottom = 200;
     } else if (currentPage === lastPage) {
       // For Banco de Chile, on the last transaction page, stop above the "III. INFORMACIÓN DE PAGO" section with 50 padding
-      bottom = pageHeight - (endCoordinates.y + endCoordinates.height) + 50;
+      bottom = pageHeight - (endCoordinates.y + endCoordinates.height) + 25;
     }
     if (currentPage !== 0) {
       // For Banco de Chile, on intermediate pages, add 50 padding at top to remove repeated headers
-      top = 45;
+      top = 30;
     }
 
     return { bottom, top };

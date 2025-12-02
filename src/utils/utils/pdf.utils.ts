@@ -1,7 +1,7 @@
 import { TransactionsCoordinates } from '@modules/credit-card-statement/credit-card-statement.interface';
 import { PDFDocument } from 'pdf-lib';
 import { PDFPageProxy } from 'pdfjs-dist';
-import { removeAccents } from './string.utils';
+import { removeAccents, removeSpaces } from './string.utils';
 import PdfParse from 'pdf-parse-new';
 import { TextContent, TextItem } from 'pdfjs-dist/types/src/display/api';
 
@@ -40,7 +40,8 @@ export async function findTextCoordinates(
         const item = items[index];
 
         const { groupedText, groupedWidth, groupingIndex } = groupCharactersText(items, index, textContent);
-        if (removeAccents(groupedText.toLowerCase()).includes(searchText)) {
+        const formattedGroupedText = removeSpaces(removeAccents(groupedText.toLowerCase()));
+        if (formattedGroupedText.includes(removeSpaces(removeAccents(searchText.toLowerCase())))) {
           textItems.push({
             text: groupedText,
             x: item.transform[4],

@@ -26,6 +26,7 @@ export interface Transaction {
   totalInstallments: number;
   monthlyAmount: number;
   reference: string;
+  creditCard: string;
 }
 
 export interface TransactionCategory {

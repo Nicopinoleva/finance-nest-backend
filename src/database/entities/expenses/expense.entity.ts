@@ -46,6 +46,10 @@ export class Expense {
   @Field(() => String, { nullable: true })
   referenceCode: string | null;
 
+  @Column({ type: 'boolean', default: true })
+  @Field(() => Boolean)
+  installmentsFulfilled: boolean;
+
   @ManyToOne(() => PaymentMethod)
   @Field(() => PaymentMethod)
   paymentMethod: PaymentMethod;

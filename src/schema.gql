@@ -61,12 +61,27 @@ type BankAccount {
   updatedBy: Users
 }
 
+type CreditCardAccount {
+  id: ID!
+  limit: Int!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  creditCards: [PaymentMethod!]!
+  createdBy: Users!
+  updatedBy: Users
+}
+
 type PaymentMethod {
   id: ID!
   name: String!
   description: String
-  bankAccount: BankAccount!
+  isAdditional: Boolean!
+  order: Float!
+  isActive: Boolean!
+  bankAccount: BankAccount
   paymentMethodType: PaymentMethodTypes!
+  parentPaymentMethod: PaymentMethod
+  creditCardAccount: CreditCardAccount
   createdAt: DateTime!
   updatedAt: DateTime!
   createdBy: Users!
@@ -97,6 +112,7 @@ type Expense {
   totalInstallments: Int!
   date: Date!
   referenceCode: String
+  installmentsFulfilled: Boolean!
   paymentMethod: PaymentMethod!
   creditCardStatement: CreditCardStatement
   parentInstallment: Expense

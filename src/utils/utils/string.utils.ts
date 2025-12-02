@@ -15,3 +15,13 @@ export function removeAccents(str: string): string {
 export function normalizeDateString(dateStr: string): string {
   return dateStr.replaceAll('/', '-');
 }
+
+/**
+ * Removes all whitespace characters from a string.
+ *
+ * @param {string} str - The string to remove spaces from.
+ * @returns {string} The string with all whitespace removed.
+ */
+export function removeSpaces(str: string): string {
+  return str.replaceAll(/\s/g, '');
+}
