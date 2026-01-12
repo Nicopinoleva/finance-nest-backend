@@ -3,7 +3,7 @@ import {
   CreditCardStatement,
   CreditCardStatementReference,
   Expense,
-  ExpenseType,
+  Category,
   PaymentMethod,
 } from '@entities';
 import { ParsedStatement, Transaction } from '@modules/credit-card-statement/credit-card-statement.interface';
@@ -12,8 +12,10 @@ import { TransactionalAdapterTypeOrm } from '@nestjs-cls/transactional-adapter-t
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { parse, subDays } from 'date-fns';
+import { format, parse, subDays } from 'date-fns';
 import { formatInTimeZone } from 'date-fns-tz';
+import { EmailService } from '@modules/email/email.service';
+import { CreditCardStatementService } from '@modules/credit-card-statement/credit-card-statement.service';
 
 @Injectable()
 export class ExpensesService {
@@ -22,6 +24,8 @@ export class ExpensesService {
   constructor(
     @InjectRepository(Expense)
     private readonly expenseRepository: Repository<Expense>,
+    private readonly emailService: EmailService,
+    private readonly creditCardStatementService: CreditCardStatementService,
     private readonly txHost: TransactionHost<TransactionalAdapterTypeOrm>,
   ) {}
 
@@ -101,8 +105,12 @@ export class ExpensesService {
       {},
     );
 
-    const expensesTypes = await this.txHost.tx.find(ExpenseType);
-    const expenseTypesMap = expensesTypes.reduce<Record<string, ExpenseType>>((map, type) => {
+    const expensesTypes = await this.txHost.tx.find(Category, {
+      where: {
+        createdById: 'c3983079-8ad2-4057-aa26-5418e1003563', // TODO: placeholder for testing
+      },
+    });
+    const categoriesMap = expensesTypes.reduce<Record<string, Category>>((map, type) => {
       map[type.name] = type;
       return map;
     }, {});
@@ -152,7 +160,7 @@ export class ExpensesService {
         expense.referenceCode = transaction.referenceCode;
         expense.paymentMethod = mainCreditCard;
         // TODO: placeholder for testing
-        expense.expenseType = expenseTypesMap['GASTOS'] ?? null;
+        expense.category = categoriesMap['GASTOS'] ?? null;
         expense.creditCardStatementReferenceId = transaction.reference
           ? referencesMap[transaction.reference]?.id
           : null;
@@ -251,5 +259,46 @@ export class ExpensesService {
       .where({ id: In(parentInstallmentsIds) })
       .orWhere({ parentInstallmentId: In(parentInstallmentsIds) })
       .execute();
+  }
+
+  async saveUnbilledExpenses() {
+    let latestStatementDate = await this.creditCardStatementService.getLatestCreditCardStatementDate();
+    if (!latestStatementDate) {
+      latestStatementDate = new Date(); // If no statements exist, set to epoch
+    }
+    const emailExpenses = await this.emailService.filterEmails([
+      ['SINCE', formatInTimeZone(latestStatementDate, 'UTC', 'MM-dd-yyyy')],
+      ['FROM', 'enviodigital@bancochile.cl'],
+      ['SUBJECT', 'Compra'],
+    ]);
+    const paymentMethods = await this.txHost.tx.find(PaymentMethod, {
+      where: {
+        createdById: 'c3983079-8ad2-4057-aa26-5418e1003563', // TODO: placeholder for testing
+        isActive: true,
+      },
+    });
+    const paymentMethodsMap = paymentMethods.reduce<Record<string, PaymentMethod>>((map, paymentMethod) => {
+      map[paymentMethod.name] = paymentMethod;
+      return map;
+    }, {});
+    const expensesToSave: Expense[] = [];
+    for (const emailExpense of emailExpenses) {
+      if (emailExpense.currency !== 'CLP') {
+        continue;
+      }
+      const expense = new Expense();
+      expense.date = emailExpense.date;
+      expense.description = emailExpense.description;
+      expense.operationAmount = Math.round(Number.parseFloat(emailExpense.amount) * 100);
+      expense.totalAmount = Math.round(Number.parseFloat(emailExpense.amount) * 100);
+      expense.monthlyAmount = Math.round(Number.parseFloat(emailExpense.amount) * 100);
+      expense.currentInstallment = 1;
+      expense.totalInstallments = 1;
+      expense.paymentMethod = paymentMethodsMap[emailExpense.paymentMethodNumber];
+      expense.createdById = 'c3983079-8ad2-4057-aa26-5418e1003563'; // TODO: placeholder for testing
+      expensesToSave.push(expense);
+    }
+    await this.txHost.tx.save(Expense, expensesToSave);
+    return emailExpenses;
   }
 }

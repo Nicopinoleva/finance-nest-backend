@@ -3,7 +3,7 @@ import { Field, ID, Int, ObjectType } from '@nestjs/graphql';
 import { GraphQLDate, GraphQLDateTime } from 'graphql-scalars';
 import { Column, CreateDateColumn, Entity, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 import { PaymentMethod } from '../payment-methods/payment-method.entity';
-import { ExpenseType } from './expense-type.entity';
+import { Category } from '../categories/category.entity';
 import { CreditCardStatementReference } from '../credit-card-statement/credit-card-statement-reference.entity';
 import { CreditCardStatement } from '../credit-card-statement/credit-card-statement.entity';
 
@@ -66,9 +66,9 @@ export class Expense {
   @Field(() => CreditCardStatementReference, { nullable: true })
   creditCardStatementReference: CreditCardStatementReference | null;
 
-  @ManyToOne(() => ExpenseType)
-  @Field(() => ExpenseType)
-  expenseType: ExpenseType;
+  @ManyToOne(() => Category, { nullable: true })
+  @Field(() => Category, { nullable: true })
+  category: Category | null;
 
   @CreateDateColumn({ type: 'timestamp with time zone', precision: 3 })
   @Field(() => GraphQLDateTime)
@@ -87,8 +87,8 @@ export class Expense {
   @Column({ type: 'uuid', nullable: true })
   parentInstallmentId: string | null;
 
-  @Column({ type: 'uuid' })
-  expenseTypeId: string;
+  @Column({ type: 'uuid', nullable: true })
+  categoryId: string | null;
 
   @Column({ type: 'uuid', nullable: true })
   creditCardStatementReferenceId: string | null;

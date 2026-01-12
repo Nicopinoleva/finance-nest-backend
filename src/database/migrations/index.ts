@@ -8,6 +8,8 @@ import { AddPaymentMethodParentId1764101097068 } from './1764101097068-add-payme
 import { AddCreditCardAccount1764173511609 } from './1764173511609-add-credit-card-account';
 import { AddPaymentMethodIsAdditionalOrderIsActive1764185787720 } from './1764185787720-add-paymentMethod-isAdditional-order-isActive';
 import { AddExpenseInstallmentsFulfilled1764197350556 } from './1764197350556-add-expense-installmentsFulfilled';
+import { AddCategoryDeleteExpenseIncomeType1764875272978 } from './1764875272978-add-category-delete-expense-income-type';
+import { ExpenseCategoryNullable1768192901560 } from './1768192901560-expense-category-nullable';
 
 export const migrations = [
   InitDatabase1756317501748,
@@ -20,4 +22,6 @@ export const migrations = [
   AddCreditCardAccount1764173511609,
   AddPaymentMethodIsAdditionalOrderIsActive1764185787720,
   AddExpenseInstallmentsFulfilled1764197350556,
+  AddCategoryDeleteExpenseIncomeType1764875272978,
+  ExpenseCategoryNullable1768192901560,
 ];

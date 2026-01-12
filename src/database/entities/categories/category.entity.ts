@@ -5,7 +5,7 @@ import { Column, CreateDateColumn, Entity, ManyToOne, PrimaryGeneratedColumn, Up
 
 @Entity()
 @ObjectType()
-export class IncomeType {
+export class Category {
   @PrimaryGeneratedColumn('uuid')
   @Field(() => ID)
   id: string;
@@ -14,6 +14,14 @@ export class IncomeType {
   @Field(() => String)
   name: string;
 
+  @Column('varchar', { nullable: true })
+  @Field(() => String, { nullable: true })
+  description: string | null;
+
+  @ManyToOne(() => Category, { nullable: true })
+  @Field(() => Category, { nullable: true })
+  parentCategory: Category | null;
+
   @CreateDateColumn({ type: 'timestamp with time zone', precision: 3 })
   @Field(() => GraphQLDateTime)
   createdAt: Date;
@@ -21,6 +29,9 @@ export class IncomeType {
   @UpdateDateColumn({ type: 'timestamp with time zone', precision: 3 })
   @Field(() => GraphQLDateTime)
   updatedAt: Date;
+
+  @Column({ type: 'uuid', nullable: true })
+  parentCategoryId: string | null;
 
   @ManyToOne(() => Users)
   @Field(() => Users)

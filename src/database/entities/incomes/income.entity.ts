@@ -2,8 +2,8 @@ import { Users } from '../users/users.entity';
 import { Field, ID, Int, ObjectType } from '@nestjs/graphql';
 import { GraphQLDate, GraphQLDateTime } from 'graphql-scalars';
 import { Column, CreateDateColumn, Entity, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
-import { IncomeType } from './income-type.entity';
 import { BankAccount } from '../banks/bank-account.entity';
+import { Category } from '../categories/category.entity';
 
 @Entity()
 @ObjectType()
@@ -32,9 +32,9 @@ export class Income {
   @Field(() => BankAccount)
   bankAccount: BankAccount;
 
-  @ManyToOne(() => IncomeType)
-  @Field(() => IncomeType)
-  incomeType: IncomeType;
+  @ManyToOne(() => Category)
+  @Field(() => Category)
+  category: Category;
 
   @CreateDateColumn({ type: 'timestamp with time zone', precision: 3 })
   @Field(() => GraphQLDateTime)
@@ -48,7 +48,7 @@ export class Income {
   bankAccountId: string;
 
   @Column({ type: 'uuid' })
-  incomeTypeId: string;
+  categoryId: string;
 
   @ManyToOne(() => Users)
   @Field(() => Users)

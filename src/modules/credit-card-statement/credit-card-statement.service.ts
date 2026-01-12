@@ -1,4 +1,4 @@
-import { HttpException, HttpStatus, Injectable, Scope } from '@nestjs/common';
+import { forwardRef, HttpException, HttpStatus, Inject, Injectable, Scope } from '@nestjs/common';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
@@ -38,6 +38,7 @@ export class CreditCardStatementService {
     @InjectRepository(CreditCardStatement)
     private readonly creditCardStatementRepository: Repository<CreditCardStatement>,
     private readonly paymentMethodService: PaymentMethodsService,
+    @Inject(forwardRef(() => ExpensesService))
     private readonly expensesService: ExpensesService,
     private readonly txHost: TransactionHost<TransactionalAdapterTypeOrm>,
   ) {}
@@ -770,5 +771,19 @@ export class CreditCardStatementService {
     fs.writeFile(outputPath, newPdfBytes);
 
     return outputPath;
+  }
+
+  async getLatestCreditCardStatementDate() {
+    const latestStatement = await this.creditCardStatementRepository.find({
+      select: {
+        id: true,
+        billingPeriodEnd: true,
+      },
+      order: {
+        billingPeriodEnd: 'DESC',
+      },
+    });
+
+    return latestStatement.length > 0 ? latestStatement[0].billingPeriodEnd : null;
   }
 }

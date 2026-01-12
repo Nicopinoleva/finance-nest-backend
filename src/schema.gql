@@ -88,18 +88,20 @@ type PaymentMethod {
   updatedBy: Users
 }
 
-type CreditCardStatementReference {
+type Category {
   id: ID!
   name: String!
-}
-
-type ExpenseType {
-  id: ID!
-  name: String!
+  description: String
+  parentCategory: Category
   createdAt: DateTime!
   updatedAt: DateTime!
   createdBy: Users!
   updatedBy: Users
+}
+
+type CreditCardStatementReference {
+  id: ID!
+  name: String!
 }
 
 type Expense {
@@ -117,7 +119,7 @@ type Expense {
   creditCardStatement: CreditCardStatement
   parentInstallment: Expense
   creditCardStatementReference: CreditCardStatementReference
-  expenseType: ExpenseType!
+  category: Category
   createdAt: DateTime!
   updatedAt: DateTime!
   createdBy: Users!
@@ -152,40 +154,34 @@ type CreditCardStatement {
   updatedBy: Users
 }
 
-type IncomeType {
-  id: ID!
-  name: String!
-  createdAt: DateTime!
-  updatedAt: DateTime!
-  createdBy: Users!
-  updatedBy: Users
-}
-
-type EmailAttachment {
-  filename: String!
-  contentType: String!
-  size: Int!
-}
-
-type EmailMessage {
-  id: ID!
-  from: String!
-  to: String!
-  subject: String!
-  date: DateTime!
-  text: String!
-  html: String!
-  attachments: [EmailAttachment!]!
+type EmailTransactionDto {
+  date: String!
+  paymentMethodNumber: String!
+  currency: String!
+  amount: String!
+  location: String!
+  description: String!
 }
 
 type Query {
   sayHello: String!
-  readEmails: [EmailMessage!]!
-  searchEmails(searchCriteria: [[String!]!]!): [EmailMessage!]!
 }
 
 type Mutation {
+  saveUnbilledExpenses: [EmailTransactionDto!]!
+  createCategory(input: CreateCategoryInput!): Category!
   createIncome(input: CreateIncomeInput!): String!
+}
+
+input CreateCategoryInput {
+  """Nombre categoría"""
+  name: String!
+
+  """Descripción categoría"""
+  description: String
+
+  """ID categoría padre"""
+  parentCategoryId: ID
 }
 
 input CreateIncomeInput {
