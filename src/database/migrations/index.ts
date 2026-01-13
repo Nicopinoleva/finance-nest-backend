@@ -10,6 +10,10 @@ import { AddPaymentMethodIsAdditionalOrderIsActive1764185787720 } from './176418
 import { AddExpenseInstallmentsFulfilled1764197350556 } from './1764197350556-add-expense-installmentsFulfilled';
 import { AddCategoryDeleteExpenseIncomeType1764875272978 } from './1764875272978-add-category-delete-expense-income-type';
 import { ExpenseCategoryNullable1768192901560 } from './1768192901560-expense-category-nullable';
+import { ExpenseDateTime1768222063620 } from './1768222063620-expense-date-time';
+import { ExpenseCurrency1768223803625 } from './1768223803625-expense-currency';
+import { ExpenseCurrencyDropDefault1768224045017 } from './1768224045017-expense-currency-drop-default';
+import { ExpenseAmountsFloats1768225128101 } from './1768225128101-expense-amounts-floats';
 
 export const migrations = [
   InitDatabase1756317501748,
@@ -24,4 +28,8 @@ export const migrations = [
   AddExpenseInstallmentsFulfilled1764197350556,
   AddCategoryDeleteExpenseIncomeType1764875272978,
   ExpenseCategoryNullable1768192901560,
+  ExpenseDateTime1768222063620,
+  ExpenseCurrency1768223803625,
+  ExpenseCurrencyDropDefault1768224045017,
+  ExpenseAmountsFloats1768225128101,
 ];

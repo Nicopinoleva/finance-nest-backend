@@ -1,6 +1,6 @@
 import { Users } from '../users/users.entity';
-import { Field, ID, Int, ObjectType } from '@nestjs/graphql';
-import { GraphQLDate, GraphQLDateTime } from 'graphql-scalars';
+import { Field, Float, ID, Int, ObjectType } from '@nestjs/graphql';
+import { GraphQLDateTime } from 'graphql-scalars';
 import { Column, CreateDateColumn, Entity, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 import { PaymentMethod } from '../payment-methods/payment-method.entity';
 import { Category } from '../categories/category.entity';
@@ -18,17 +18,21 @@ export class Expense {
   @Field(() => String)
   description: string;
 
-  @Column({ type: 'integer' })
-  @Field(() => Int)
+  @Column({ type: 'decimal', precision: 15, scale: 4 })
+  @Field(() => Float)
   operationAmount: number;
 
-  @Column({ type: 'integer' })
-  @Field(() => Int)
+  @Column({ type: 'decimal', precision: 15, scale: 4 })
+  @Field(() => Float)
   totalAmount: number;
 
-  @Column({ type: 'integer' })
-  @Field(() => Int)
+  @Column({ type: 'decimal', precision: 15, scale: 4 })
+  @Field(() => Float)
   monthlyAmount: number;
+
+  @Column({ type: 'decimal', precision: 15, scale: 4, nullable: true })
+  @Field(() => Float, { nullable: true })
+  sourceCurrencyAmount: number | null;
 
   @Column({ type: 'integer' })
   @Field(() => Int)
@@ -38,9 +42,13 @@ export class Expense {
   @Field(() => Int)
   totalInstallments: number;
 
-  @Column({ type: 'date' })
-  @Field(() => GraphQLDate)
+  @Column({ type: 'timestamp with time zone', precision: 3 })
+  @Field(() => GraphQLDateTime)
   date: Date;
+
+  @Column('varchar')
+  @Field(() => String)
+  currency: string;
 
   @Column('varchar', { nullable: true })
   @Field(() => String, { nullable: true })

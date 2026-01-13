@@ -307,15 +307,6 @@ export class EmailService {
       }
     }
 
-    const cleanAmount = amount.replaceAll(/[,.]/g, (match, offset, string) => {
-      // Replace commas with nothing (thousands separator)
-      // Keep the last period/comma as decimal separator
-      const lastDot = string.lastIndexOf('.');
-      const lastComma = string.lastIndexOf(',');
-      const lastSeparator = Math.max(lastDot, lastComma);
-      return offset === lastSeparator ? '.' : '';
-    });
-
     const [day, month, year] = date.split('/').map(Number);
     const [hours, minutes] = time.split(':').map(Number);
 
@@ -327,7 +318,7 @@ export class EmailService {
       date: transactionDate,
       paymentMethodNumber: cardNumber,
       currency: currency,
-      amount: cleanAmount,
+      amount: amount,
       location: location,
       description: description,
     };

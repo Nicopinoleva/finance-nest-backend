@@ -1,14 +1,13 @@
 import { Mutation, Resolver } from '@nestjs/graphql';
 import { ExpensesService } from './expenses.service';
-import { EmailTransaction } from '@modules/email/email.service';
-import { EmailTransactionDto } from '@modules/email/dto/email-transaction.dto';
+import { Expense } from '@entities';
 
 @Resolver()
 export class ExpensesResolver {
   constructor(private readonly expensesService: ExpensesService) {}
 
-  @Mutation(() => [EmailTransactionDto])
-  async saveUnbilledExpenses(): Promise<EmailTransaction[]> {
+  @Mutation(() => [Expense])
+  async saveUnbilledExpenses(): Promise<Expense[]> {
     return await this.expensesService.saveUnbilledExpenses();
   }
 }

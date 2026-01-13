@@ -107,12 +107,14 @@ type CreditCardStatementReference {
 type Expense {
   id: ID!
   description: String!
-  operationAmount: Int!
-  totalAmount: Int!
-  monthlyAmount: Int!
+  operationAmount: Float!
+  totalAmount: Float!
+  monthlyAmount: Float!
+  sourceCurrencyAmount: Float
   currentInstallment: Int!
   totalInstallments: Int!
-  date: Date!
+  date: DateTime!
+  currency: String!
   referenceCode: String
   installmentsFulfilled: Boolean!
   paymentMethod: PaymentMethod!
@@ -125,11 +127,6 @@ type Expense {
   createdBy: Users!
   updatedBy: Users
 }
-
-"""
-A date string, such as 2007-12-03, compliant with the `full-date` format outlined in section 5.6 of the RFC 3339 profile of the ISO 8601 standard for representation of dates and times using the Gregorian calendar.
-"""
-scalar Date
 
 type CreditCardStatement {
   id: ID!
@@ -154,21 +151,17 @@ type CreditCardStatement {
   updatedBy: Users
 }
 
-type EmailTransactionDto {
-  date: String!
-  paymentMethodNumber: String!
-  currency: String!
-  amount: String!
-  location: String!
-  description: String!
-}
+"""
+A date string, such as 2007-12-03, compliant with the `full-date` format outlined in section 5.6 of the RFC 3339 profile of the ISO 8601 standard for representation of dates and times using the Gregorian calendar.
+"""
+scalar Date
 
 type Query {
   sayHello: String!
 }
 
 type Mutation {
-  saveUnbilledExpenses: [EmailTransactionDto!]!
+  saveUnbilledExpenses: [Expense!]!
   createCategory(input: CreateCategoryInput!): Category!
   createIncome(input: CreateIncomeInput!): String!
 }

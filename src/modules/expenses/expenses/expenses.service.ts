@@ -11,11 +11,15 @@ import { Transactional, TransactionHost } from '@nestjs-cls/transactional';
 import { TransactionalAdapterTypeOrm } from '@nestjs-cls/transactional-adapter-typeorm';
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
-import { format, parse, subDays } from 'date-fns';
+import { In, IsNull, MoreThanOrEqual, Repository } from 'typeorm';
+import { parse, subDays } from 'date-fns';
 import { formatInTimeZone } from 'date-fns-tz';
-import { EmailService } from '@modules/email/email.service';
+import { EmailService, EmailTransaction } from '@modules/email/email.service';
 import { CreditCardStatementService } from '@modules/credit-card-statement/credit-card-statement.service';
+import { PaymentMethodsService } from '@modules/payment-methods/payment-methods/payment-methods.service';
+import { getLiderUnbilledExpenses, LiderBCIUnbilledExpensesResponse } from '@utils';
+import { ErrorCode } from '@utils/constants/error-code.enum';
+import { GraphQLException } from '@utils/exceptions/graphql.exception';
 
 @Injectable()
 export class ExpensesService {
@@ -26,6 +30,7 @@ export class ExpensesService {
     private readonly expenseRepository: Repository<Expense>,
     private readonly emailService: EmailService,
     private readonly creditCardStatementService: CreditCardStatementService,
+    private readonly paymentMethodsService: PaymentMethodsService,
     private readonly txHost: TransactionHost<TransactionalAdapterTypeOrm>,
   ) {}
 
@@ -261,7 +266,17 @@ export class ExpensesService {
       .execute();
   }
 
+  @Transactional()
   async saveUnbilledExpenses() {
+    const expensesToSave: Expense[] = [];
+    const liderUnbilledExpenses = await getLiderUnbilledExpenses();
+    if (liderUnbilledExpenses instanceof Error) {
+      this.logger.error('Error fetching Lider BCI unbilled expenses', liderUnbilledExpenses);
+      throw new GraphQLException(
+        `Failed to fetch Lider BCI unbilled expenses: ${liderUnbilledExpenses.message}`,
+        ErrorCode.INTERNAL_SERVER_ERROR,
+      );
+    }
     let latestStatementDate = await this.creditCardStatementService.getLatestCreditCardStatementDate();
     if (!latestStatementDate) {
       latestStatementDate = new Date(); // If no statements exist, set to epoch
@@ -271,34 +286,104 @@ export class ExpensesService {
       ['FROM', 'enviodigital@bancochile.cl'],
       ['SUBJECT', 'Compra'],
     ]);
-    const paymentMethods = await this.txHost.tx.find(PaymentMethod, {
+    const paymentMethodsMap = await this.paymentMethodsService.getActivePaymentMethodsMap(
+      'c3983079-8ad2-4057-aa26-5418e1003563',
+    ); // TODO: placeholder for testing
+    const existingExpensesSet = await this.existingUnbilledExpensesSet();
+    this.formatMailTransactionsForExpenseEntity(emailExpenses, expensesToSave, existingExpensesSet, paymentMethodsMap);
+    this.formatLiderUnbilledExpensesForExpenseEntity(
+      liderUnbilledExpenses,
+      expensesToSave,
+      paymentMethodsMap,
+      existingExpensesSet,
+    );
+    await this.txHost.tx.save(Expense, expensesToSave);
+    return expensesToSave;
+  }
+
+  async existingUnbilledExpensesSet(): Promise<Set<string>> {
+    const expenses = await this.txHost.tx.find(Expense, {
       where: {
         createdById: 'c3983079-8ad2-4057-aa26-5418e1003563', // TODO: placeholder for testing
-        isActive: true,
+        creditCardStatementId: IsNull(),
       },
     });
-    const paymentMethodsMap = paymentMethods.reduce<Record<string, PaymentMethod>>((map, paymentMethod) => {
-      map[paymentMethod.name] = paymentMethod;
-      return map;
-    }, {});
-    const expensesToSave: Expense[] = [];
+    const existingExpensesSet = new Set<string>();
+    for (const expense of expenses) {
+      const key = `${expense.date.toISOString()}|${expense.description}|${expense.operationAmount}`;
+      existingExpensesSet.add(key);
+    }
+    return existingExpensesSet;
+  }
+
+  async formatMailTransactionsForExpenseEntity(
+    emailExpenses: EmailTransaction[],
+    expensesToSave: Expense[],
+    existingExpensesSet: Set<string>,
+    paymentMethodsMap: Map<string, PaymentMethod>,
+  ) {
     for (const emailExpense of emailExpenses) {
-      if (emailExpense.currency !== 'CLP') {
+      // Normalize Chilean format: remove dots (.) and replace comma (,) with dot
+      const normalizedAmount = emailExpense.amount.replaceAll('.', '').replaceAll(',', '.');
+      const amountFloat = Number.parseFloat(normalizedAmount);
+
+      const expenseKey = `${emailExpense.date.toISOString()}|${emailExpense.description}|${amountFloat.toFixed(4)}`;
+      if (existingExpensesSet.has(expenseKey)) {
+        continue;
+      }
+      const paymentMethod = paymentMethodsMap.get(emailExpense.paymentMethodNumber);
+      if (!paymentMethod) {
+        this.logger.warn(
+          `Payment method with number ${emailExpense.paymentMethodNumber} not found for unbilled expense: ${emailExpense.description}, skipping...`,
+        );
         continue;
       }
       const expense = new Expense();
       expense.date = emailExpense.date;
       expense.description = emailExpense.description;
-      expense.operationAmount = Math.round(Number.parseFloat(emailExpense.amount) * 100);
-      expense.totalAmount = Math.round(Number.parseFloat(emailExpense.amount) * 100);
-      expense.monthlyAmount = Math.round(Number.parseFloat(emailExpense.amount) * 100);
+      expense.operationAmount = amountFloat;
+      expense.totalAmount = amountFloat;
+      expense.monthlyAmount = amountFloat;
       expense.currentInstallment = 1;
       expense.totalInstallments = 1;
-      expense.paymentMethod = paymentMethodsMap[emailExpense.paymentMethodNumber];
+      expense.paymentMethod = paymentMethod;
+      expense.createdById = 'c3983079-8ad2-4057-aa26-5418e1003563'; // TODO: placeholder for testing
+      expense.currency = emailExpense.currency;
+      expensesToSave.push(expense);
+    }
+  }
+
+  async formatLiderUnbilledExpensesForExpenseEntity(
+    liderUnbilledExpenses: LiderBCIUnbilledExpensesResponse,
+    expensesToSave: Expense[],
+    paymentMethodsMap: Map<string, PaymentMethod>,
+    existingExpensesSet: Set<string>,
+  ) {
+    for (const liderExpense of liderUnbilledExpenses.movimiento) {
+      const paymentMethod = paymentMethodsMap.get('9023'); // TODO: placeholder for testing
+      if (!paymentMethod) {
+        this.logger.warn(
+          `Payment method with number 9023 not found for unbilled expense: ${liderExpense.descripcion}, skipping...`,
+        );
+        continue;
+      }
+      const formattedDate = parse(liderExpense.fecha, 'dd/MM/yyyy', new Date());
+      const expenseKey = `${formattedDate.toISOString()}|${liderExpense.descripcion}|${liderExpense.monto.toFixed(4)}`;
+      if (existingExpensesSet.has(expenseKey)) {
+        continue;
+      }
+      const expense = new Expense();
+      expense.description = liderExpense.descripcion;
+      expense.date = formattedDate;
+      expense.operationAmount = liderExpense.monto;
+      expense.totalAmount = liderExpense.monto;
+      expense.monthlyAmount = liderExpense.monto;
+      expense.currency = liderExpense.tipo;
+      expense.paymentMethod = paymentMethod;
+      expense.currentInstallment = 1;
+      expense.totalInstallments = liderExpense.cuota.length > 0 ? Number.parseInt(liderExpense.cuota.split('/')[1]) : 1;
       expense.createdById = 'c3983079-8ad2-4057-aa26-5418e1003563'; // TODO: placeholder for testing
       expensesToSave.push(expense);
     }
-    await this.txHost.tx.save(Expense, expensesToSave);
-    return emailExpenses;
   }
 }

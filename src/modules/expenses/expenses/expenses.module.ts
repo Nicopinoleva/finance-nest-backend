@@ -5,9 +5,15 @@ import { Expense } from '@entities/expenses/expense.entity';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { EmailModule } from '@modules/email/email.module';
 import { CreditCardStatementModule } from '@modules/credit-card-statement/credit-card-statement.module';
+import { PaymentMethodsModule } from '@modules/payment-methods/payment-methods/payment-methods.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Expense]), EmailModule, forwardRef(() => CreditCardStatementModule)],
+  imports: [
+    TypeOrmModule.forFeature([Expense]),
+    EmailModule,
+    forwardRef(() => CreditCardStatementModule),
+    PaymentMethodsModule,
+  ],
   providers: [ExpensesResolver, ExpensesService],
   exports: [ExpensesService],
 })

@@ -14,4 +14,12 @@ export class PaymentMethodsService {
     const paymentMethod = await this.paymentMethodRepository.findOne({ select: { id: true }, where: { name } });
     return paymentMethod;
   }
+
+  async getActivePaymentMethodsMap(userId: string): Promise<Map<string, PaymentMethod>> {
+    const paymentMethods = await this.paymentMethodRepository.find({ where: { isActive: true, createdById: userId } });
+    return paymentMethods.reduce<Map<string, PaymentMethod>>((map, paymentMethod) => {
+      map.set(paymentMethod.name, paymentMethod);
+      return map;
+    }, new Map());
+  }
 }
