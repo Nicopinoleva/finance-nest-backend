@@ -269,6 +269,16 @@ export class ExpensesService {
   @Transactional()
   async saveUnbilledExpenses() {
     const expensesToSave: Expense[] = [];
+    let latestStatementDate = await this.creditCardStatementService.getLatestCreditCardStatementDate();
+    if (!latestStatementDate) {
+      latestStatementDate = new Date(); // If no statements exist, set to epoch
+    }
+    const emailExpenses = await this.emailService.bancoDeChileEmailExpenses(
+      formatInTimeZone(latestStatementDate, 'UTC', 'MM-dd-yyyy'),
+    );
+    const emailCreditCardPayment = await this.emailService.bancoDeChileEmailCreditCardPayment(
+      formatInTimeZone(latestStatementDate, 'UTC', 'MM-dd-yyyy'),
+    );
     const liderUnbilledExpenses = await getLiderUnbilledExpenses();
     if (liderUnbilledExpenses instanceof Error) {
       this.logger.error('Error fetching Lider BCI unbilled expenses', liderUnbilledExpenses);
@@ -277,20 +287,16 @@ export class ExpensesService {
         ErrorCode.INTERNAL_SERVER_ERROR,
       );
     }
-    let latestStatementDate = await this.creditCardStatementService.getLatestCreditCardStatementDate();
-    if (!latestStatementDate) {
-      latestStatementDate = new Date(); // If no statements exist, set to epoch
-    }
-    const emailExpenses = await this.emailService.filterEmails([
-      ['SINCE', formatInTimeZone(latestStatementDate, 'UTC', 'MM-dd-yyyy')],
-      ['FROM', 'enviodigital@bancochile.cl'],
-      ['SUBJECT', 'Compra'],
-    ]);
     const paymentMethodsMap = await this.paymentMethodsService.getActivePaymentMethodsMap(
       'c3983079-8ad2-4057-aa26-5418e1003563',
     ); // TODO: placeholder for testing
     const existingExpensesSet = await this.existingUnbilledExpensesSet();
-    this.formatMailTransactionsForExpenseEntity(emailExpenses, expensesToSave, existingExpensesSet, paymentMethodsMap);
+    this.formatMailTransactionsForExpenseEntity(
+      [...emailExpenses, ...emailCreditCardPayment],
+      expensesToSave,
+      existingExpensesSet,
+      paymentMethodsMap,
+    );
     this.formatLiderUnbilledExpensesForExpenseEntity(
       liderUnbilledExpenses,
       expensesToSave,
