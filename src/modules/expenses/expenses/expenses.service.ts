@@ -11,7 +11,7 @@ import { Transactional, TransactionHost } from '@nestjs-cls/transactional';
 import { TransactionalAdapterTypeOrm } from '@nestjs-cls/transactional-adapter-typeorm';
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, MoreThanOrEqual, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import { parse, subDays } from 'date-fns';
 import { formatInTimeZone } from 'date-fns-tz';
 import { EmailService, EmailTransaction } from '@modules/email/email.service';
@@ -20,6 +20,7 @@ import { PaymentMethodsService } from '@modules/payment-methods/payment-methods/
 import { getLiderUnbilledExpenses, LiderBCIUnbilledExpensesResponse } from '@utils';
 import { ErrorCode } from '@utils/constants/error-code.enum';
 import { GraphQLException } from '@utils/exceptions/graphql.exception';
+import { parseFlexibleDate } from '@utils/utils/date.utils';
 
 @Injectable()
 export class ExpensesService {
@@ -136,10 +137,11 @@ export class ExpensesService {
       const category = parsedStatement.transactions[categoryKey];
       for (const transaction of category.transactions) {
         const expense = new Expense();
+        const date = parseFlexibleDate(transaction.date);
         const mapKey = this.installmentMapKey({
           currentInstallment: transaction.currentInstallment - 1,
           totalInstallments: transaction.totalInstallments,
-          date: parse(transaction.date, 'dd/MM/yy', new Date()),
+          date,
           description: transaction.description.replaceAll(/\s+/g, ''),
           referenceCode: transaction.referenceCode ?? null,
         });
@@ -161,7 +163,7 @@ export class ExpensesService {
         expense.monthlyAmount = transaction.monthlyAmount;
         expense.currentInstallment = transaction.currentInstallment;
         expense.totalInstallments = transaction.totalInstallments;
-        expense.date = parse(transaction.date, 'dd/MM/yy', new Date());
+        expense.date = date;
         expense.referenceCode = transaction.referenceCode;
         expense.paymentMethod = mainCreditCard;
         // TODO: placeholder for testing
@@ -172,6 +174,7 @@ export class ExpensesService {
         expense.creditCardStatementId = parsedStatement.creditCardStatementId;
         expense.parentInstallmentId = parentInstallmentId;
         expense.createdById = 'c3983079-8ad2-4057-aa26-5418e1003563';
+        expense.currency = 'CLP';
 
         // It's an installment, check if it's fulfilled
         if (transaction.totalInstallments > 1) {

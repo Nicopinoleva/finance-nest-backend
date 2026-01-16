@@ -7,6 +7,30 @@ export interface TransactionsCoordinates {
   page: number;
 }
 
+export interface TransactionCoordinatesWithPadding {
+  coordinates: TransactionsCoordinates[];
+  startYPadding?: number;
+  endYPadding?: number;
+  startXPadding?: number;
+  endXPadding?: number;
+}
+
+export interface CreditCardStatementCoordinates {
+  billingPeriodStartEnd?: TransactionCoordinatesWithPadding;
+  billingPeriodStart?: TransactionCoordinatesWithPadding;
+  billingPeriodEnd?: TransactionCoordinatesWithPadding;
+  transactionsTable: TransactionCoordinatesWithPadding;
+  transactionsEnd: TransactionCoordinatesWithPadding;
+  mainCreditCardText: TransactionCoordinatesWithPadding;
+  dueDateCoordinates: TransactionCoordinatesWithPadding;
+  dueAmountCoordinates: TransactionCoordinatesWithPadding;
+  minimumPaymentCoordinates: TransactionCoordinatesWithPadding;
+  previousStatementBilledAmountCoordinates?: TransactionCoordinatesWithPadding;
+  previousStatementPaidAmountCoordinates?: TransactionCoordinatesWithPadding;
+  previousStatementDebtCoordinates?: TransactionCoordinatesWithPadding;
+  unbilledStatementsTableStartCoordinates: TransactionCoordinatesWithPadding;
+}
+
 export interface CutRegion {
   x: number;
   y: number;
