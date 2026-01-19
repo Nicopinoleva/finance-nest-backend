@@ -136,78 +136,112 @@ export class ExpensesService {
     for (const categoryKey in parsedStatement.transactions) {
       const category = parsedStatement.transactions[categoryKey];
       for (const transaction of category.transactions) {
-        const expense = new Expense();
-        const date = parseFlexibleDate(transaction.date);
-        const mapKey = this.installmentMapKey({
-          currentInstallment: transaction.currentInstallment - 1,
-          totalInstallments: transaction.totalInstallments,
-          date,
-          description: transaction.description.replaceAll(/\s+/g, ''),
-          referenceCode: transaction.referenceCode ?? null,
-        });
+        const expense = this.createExpenseEntityFromTransaction(
+          transaction,
+          mainCreditCard,
+          categoriesMap,
+          referencesMap,
+          parsedStatement,
+        );
 
-        let parentInstallmentId: string | null = null;
-        const previousInstallmentExpense = this.pendingCreditCardInstallmentsMap.get(mapKey);
+        const parentInstallmentId = this.getParentInstallmentId(transaction, expense.date);
+        this.checkInstallmentFulfillment(transaction, expense, fulfilledInstallmentsExpensesIds, parentInstallmentId);
+        this.checkPrepaymentCancellation(transaction, expense, fulfilledInstallmentsExpensesIds);
 
-        if (previousInstallmentExpense) {
-          if (previousInstallmentExpense.parentInstallmentId) {
-            parentInstallmentId = previousInstallmentExpense.parentInstallmentId;
-          } else {
-            parentInstallmentId = previousInstallmentExpense.id;
-          }
-        }
-
-        expense.description = transaction.description;
-        expense.operationAmount = transaction.operationAmount;
-        expense.totalAmount = transaction.totalAmount;
-        expense.monthlyAmount = transaction.monthlyAmount;
-        expense.currentInstallment = transaction.currentInstallment;
-        expense.totalInstallments = transaction.totalInstallments;
-        expense.date = date;
-        expense.referenceCode = transaction.referenceCode;
-        expense.paymentMethod = mainCreditCard;
-        // TODO: placeholder for testing
-        expense.category = categoriesMap['GASTOS'] ?? null;
-        expense.creditCardStatementReferenceId = transaction.reference
-          ? referencesMap[transaction.reference]?.id
-          : null;
-        expense.creditCardStatementId = parsedStatement.creditCardStatementId;
-        expense.parentInstallmentId = parentInstallmentId;
-        expense.createdById = 'c3983079-8ad2-4057-aa26-5418e1003563';
-        expense.currency = 'CLP';
-
-        // It's an installment, check if it's fulfilled
-        if (transaction.totalInstallments > 1) {
-          // Final installment, fulfill parent installment and its children
-          if (transaction.currentInstallment === transaction.totalInstallments) {
-            fulfilledInstallmentsExpensesIds.push(parentInstallmentId ?? '');
-          } else {
-            expense.installmentsFulfilled = false;
-          }
-        }
-
-        if (transaction.description.includes('PREPAGO') || transaction.description.includes('ANULACION')) {
-          const parentInstallmentExpense = this.getParentInstallmentIdForPrepayment(transaction);
-          if (parentInstallmentExpense) {
-            let parentInstallmentId = parentInstallmentExpense.id;
-            if (parentInstallmentExpense.parentInstallmentId) {
-              parentInstallmentId = parentInstallmentExpense.parentInstallmentId;
-            }
-            expense.parentInstallmentId = parentInstallmentId;
-            expense.installmentsFulfilled = true;
-            fulfilledInstallmentsExpensesIds.push(parentInstallmentId);
-          } else {
-            this.logger.warn(
-              `No se encontró la cuota padre para el prepago con referencia ${transaction.referenceCode}`,
-            );
-          }
-        }
         expensesToSave.push(expense);
       }
     }
+    await this.txHost.tx.delete(Expense, {
+      creditCardStatementId: IsNull(),
+      paymentMethod: { id: mainCreditCard.id },
+    });
     await this.txHost.tx.save(Expense, expensesToSave);
     if (fulfilledInstallmentsExpensesIds.length > 0) {
       await this.setFullfilledInstallments(fulfilledInstallmentsExpensesIds);
+    }
+  }
+
+  getParentInstallmentId(transaction: Transaction, date: Date): string | null {
+    const mapKey = this.installmentMapKey({
+      currentInstallment: transaction.currentInstallment - 1,
+      totalInstallments: transaction.totalInstallments,
+      date,
+      description: transaction.description.replaceAll(/\s+/g, ''),
+      referenceCode: transaction.referenceCode ?? null,
+    });
+
+    let parentInstallmentId: string | null = null;
+    const previousInstallmentExpense = this.pendingCreditCardInstallmentsMap.get(mapKey);
+
+    if (previousInstallmentExpense) {
+      if (previousInstallmentExpense.parentInstallmentId) {
+        parentInstallmentId = previousInstallmentExpense.parentInstallmentId;
+      } else {
+        parentInstallmentId = previousInstallmentExpense.id;
+      }
+    }
+    return parentInstallmentId;
+  }
+
+  createExpenseEntityFromTransaction(
+    transaction: Transaction,
+    mainCreditCard: PaymentMethod,
+    categoriesMap: Record<string, Category>,
+    referencesMap: Record<string, CreditCardStatementReference>,
+    parsedStatement: ParsedStatement,
+  ): Expense {
+    const expense = new Expense();
+    const date = parseFlexibleDate(transaction.date);
+    const parentInstallmentId = this.getParentInstallmentId(transaction, date);
+
+    expense.description = transaction.description;
+    expense.operationAmount = transaction.operationAmount;
+    expense.totalAmount = transaction.totalAmount;
+    expense.monthlyAmount = transaction.monthlyAmount;
+    expense.currentInstallment = transaction.currentInstallment;
+    expense.totalInstallments = transaction.totalInstallments;
+    expense.date = date;
+    expense.referenceCode = transaction.referenceCode;
+    expense.paymentMethod = mainCreditCard;
+    // TODO: placeholder for testing
+    expense.category = categoriesMap['GASTOS'] ?? null;
+    expense.creditCardStatementReferenceId = transaction.reference ? referencesMap[transaction.reference]?.id : null;
+    expense.creditCardStatementId = parsedStatement.creditCardStatementId;
+    expense.parentInstallmentId = parentInstallmentId;
+    expense.createdById = 'c3983079-8ad2-4057-aa26-5418e1003563';
+    expense.currency = 'CLP';
+    return expense;
+  }
+
+  checkInstallmentFulfillment(
+    transaction: Transaction,
+    expense: Expense,
+    fulfilledInstallmentsExpensesIds: string[],
+    parentInstallmentId: string | null,
+  ) {
+    // It's an installment, check if it's fulfilled
+    if (transaction.totalInstallments > 1) {
+      // Final installment, fulfill parent installment and its children
+      if (transaction.currentInstallment === transaction.totalInstallments) {
+        fulfilledInstallmentsExpensesIds.push(parentInstallmentId ?? '');
+      } else {
+        expense.installmentsFulfilled = false;
+      }
+    }
+  }
+
+  checkPrepaymentCancellation(transaction: Transaction, expense: Expense, fulfilledInstallmentsExpensesIds: string[]) {
+    const parentInstallmentExpense = this.getParentInstallmentIdForPrepayment(transaction);
+    if (parentInstallmentExpense) {
+      let parentInstallmentId = parentInstallmentExpense.id;
+      if (parentInstallmentExpense.parentInstallmentId) {
+        parentInstallmentId = parentInstallmentExpense.parentInstallmentId;
+      }
+      expense.parentInstallmentId = parentInstallmentId;
+      expense.installmentsFulfilled = true;
+      fulfilledInstallmentsExpensesIds.push(parentInstallmentId);
+    } else {
+      this.logger.warn(`No se encontró la cuota padre para el prepago con referencia ${transaction.referenceCode}`);
     }
   }
 
