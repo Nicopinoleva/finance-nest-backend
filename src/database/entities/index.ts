@@ -1,5 +1,6 @@
 import { BankAccountType } from './banks/bank-account-type.entity';
 import { BankAccount } from './banks/bank-account.entity';
+import { BankParseConfiguration } from './banks/bank-parse-configuration.entity';
 import { Banks } from './banks/banks.entity';
 import { Category } from './categories/category.entity';
 import { CreditCardAccount } from './credit-card-statement/credit-card-account.entity';
@@ -24,6 +25,7 @@ export const entities = [
   CreditCardStatementReference,
   CreditCardAccount,
   Category,
+  BankParseConfiguration,
 ];
 
 export {
@@ -39,4 +41,5 @@ export {
   CreditCardStatementReference,
   CreditCardAccount,
   Category,
+  BankParseConfiguration,
 };

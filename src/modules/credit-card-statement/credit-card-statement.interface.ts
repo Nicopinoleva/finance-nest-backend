@@ -9,10 +9,12 @@ export interface TransactionsCoordinates {
 
 export interface TransactionCoordinatesWithPadding {
   coordinates: TransactionsCoordinates[];
+  text: string;
   startYPadding?: number;
   endYPadding?: number;
   startXPadding?: number;
   endXPadding?: number;
+  stopOnFirstMatch?: boolean;
 }
 
 export interface CreditCardStatementCoordinates {

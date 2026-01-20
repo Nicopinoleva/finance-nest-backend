@@ -25,3 +25,37 @@ export function normalizeDateString(dateStr: string): string {
 export function removeSpaces(str: string): string {
   return str.replaceAll(/\s/g, '');
 }
+
+/**
+ * Removes all whitespace characters from a string.
+ *
+ * @param {string[]} texts - The array of strings to search for a pattern match.
+ * @param {RegExp} pattern - The regular expression pattern to match against the texts.
+ * @returns {RegExpExecArray | null} The first match found or null if no match is found.
+ */
+export function matchTextWithPattern(texts: string[], pattern: RegExp): RegExpExecArray | null {
+  for (const text of texts) {
+    const match = pattern.exec(text);
+    if (match) {
+      return match;
+    }
+  }
+  return null;
+}
+/**
+ * Searches for all matches of a given pattern in an array of strings.
+ *
+ * @param {string[]} texts - The array of strings to search for pattern matches.
+ * @param {RegExp} pattern - The regular expression pattern to match against the texts.
+ * @returns {string[]} An array of all matched strings.
+ */
+export function matchMultipleTextWithPattern(texts: string[], pattern: RegExp): string[] {
+  const matches: string[] = [];
+  for (const text of texts) {
+    const match = text.match(pattern);
+    if (match) {
+      matches.push(...match);
+    }
+  }
+  return matches;
+}

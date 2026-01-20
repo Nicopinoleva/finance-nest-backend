@@ -9,6 +9,7 @@ import {
   RegionBounds,
   Transaction,
   TransactionCategory,
+  TransactionCoordinatesWithPadding,
   TransactionsCoordinates,
 } from './credit-card-statement.interface';
 import { ExpensesService } from '@modules/expenses/expenses/expenses.service';
@@ -20,8 +21,17 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { PaymentMethodsService } from '@modules/payment-methods/payment-methods/payment-methods.service';
 import { Transactional, TransactionHost } from '@nestjs-cls/transactional';
 import { TransactionalAdapterTypeOrm } from '@nestjs-cls/transactional-adapter-typeorm';
-import { CreditCardStatementBanks, extractTextFromCoordinates, findTextCoordinates, normalizeDateString } from '@utils';
-import { PaymentMethod } from '@entities';
+import {
+  CreditCardStatementBanks,
+  extractTextFromCoordinates,
+  findTextCoordinates,
+  matchMultipleTextWithPattern,
+  matchTextWithPattern,
+  normalizeDateString,
+  parseAmount,
+  PaymentMethodTypesEnum,
+} from '@utils';
+import { BankParseConfiguration, PaymentMethod } from '@entities';
 
 interface TotalMatch {
   amount: string;
@@ -37,24 +47,31 @@ export class CreditCardStatementService {
   private readonly creditCardStatementCoordinates: CreditCardStatementCoordinates = {
     transactionsTable: {
       coordinates: [],
+      text: '',
     },
     transactionsEnd: {
       coordinates: [],
+      text: '',
     },
     mainCreditCardText: {
       coordinates: [],
+      text: '',
     },
     dueDateCoordinates: {
       coordinates: [],
+      text: '',
     },
     dueAmountCoordinates: {
       coordinates: [],
+      text: '',
     },
     minimumPaymentCoordinates: {
       coordinates: [],
+      text: '',
     },
     unbilledStatementsTableStartCoordinates: {
       coordinates: [],
+      text: '',
     },
   };
   constructor(
@@ -79,121 +96,48 @@ export class CreditCardStatementService {
         throw new HttpException('Pdf con contraseña no es soportado', HttpStatus.UNPROCESSABLE_ENTITY);
       }
     }
-    if (bankToParse === CreditCardStatementBanks.BancoDeChile) {
-      await this.asyncParseBancoDeChileStatement(file);
-    } else if (bankToParse === CreditCardStatementBanks.LiderBCI) {
-      await this.asyncParseLiderBciStatement(file);
-    }
+    this.bankToParse = bankToParse;
+    await this.textCoordinateFindConfig(file);
 
     // Optionally render debug PDF
-    // if (renderDebugPdf) {
-    //   await this.generateTransactionRegionsPdf(file, filePath);
-    // }
-
-    await this.generateTransactionRegionsPdf(file, filePath);
+    if (renderDebugPdf) {
+      await this.generateTransactionRegionsPdf(file, filePath);
+    }
 
     return await this.extractAndParseTransactions(file);
   }
 
-  async asyncParseBancoDeChileStatement(file: Express.Multer.File) {
-    // TODO: make this one call to run throw pdf only once(check if possible with legacy pdfs, seem that they are not ordered)
-    this.creditCardStatementCoordinates.mainCreditCardText = {
-      coordinates: await findTextCoordinates(file, 'n° de tarjeta de credito', this.creditCardStatementPDF),
-      endYPadding: -3,
-    };
-    this.creditCardStatementCoordinates.billingPeriodStartEnd = {
-      coordinates: await findTextCoordinates(file, 'periodo facturado', this.creditCardStatementPDF),
-      endYPadding: 0,
-      startXPadding: 15,
-      endXPadding: 90,
-    };
-    this.creditCardStatementCoordinates.dueDateCoordinates = {
-      coordinates: await findTextCoordinates(file, 'pagar hasta', this.creditCardStatementPDF, false),
-      startYPadding: 10,
-      endYPadding: 10,
-    };
-    this.creditCardStatementCoordinates.dueAmountCoordinates = {
-      coordinates: await findTextCoordinates(file, 'monto total facturado a pagar', this.creditCardStatementPDF),
-      endYPadding: 10,
-    };
-    this.creditCardStatementCoordinates.minimumPaymentCoordinates = {
-      coordinates: await findTextCoordinates(file, 'monto minimo a pagar', this.creditCardStatementPDF),
-      endYPadding: 10,
-    };
-    this.creditCardStatementCoordinates.previousStatementDebtCoordinates = {
-      coordinates: await findTextCoordinates(
-        file,
-        'saldo adeudado final periodo anterior',
-        this.creditCardStatementPDF,
-      ),
-      endYPadding: 10,
-      startXPadding: 70,
-      endXPadding: 130,
-    };
-    this.creditCardStatementCoordinates.transactionsTable = {
-      coordinates: await findTextCoordinates(file, '2. periodo actual', this.creditCardStatementPDF, false),
-      endYPadding: 0,
-    };
-    this.creditCardStatementCoordinates.transactionsEnd = {
-      coordinates: await findTextCoordinates(file, 'iii. informacion de pago', this.creditCardStatementPDF),
-      endYPadding: 0,
-    };
-    this.creditCardStatementCoordinates.unbilledStatementsTableStartCoordinates = {
-      coordinates: await findTextCoordinates(file, '4. informacion compras en cuotas', this.creditCardStatementPDF),
-      endYPadding: 0,
-    };
-    this.bankToParse = CreditCardStatementBanks.BancoDeChile;
-  }
+  async textCoordinateFindConfig(file: Express.Multer.File) {
+    const config = await this.txHost.tx.findOneOrFail(BankParseConfiguration, {
+      where: {
+        bank: { name: this.bankToParse },
+        paymentMethodType: { name: PaymentMethodTypesEnum.CreditCard },
+      },
+    });
 
-  async asyncParseLiderBciStatement(file: Express.Multer.File) {
-    // TODO: make this one call to run throw pdf only once(check if possible with legacy pdfs, seem that they are not ordered)
-    this.creditCardStatementCoordinates.mainCreditCardText = {
-      coordinates: await findTextCoordinates(file, 'Número tarjeta', this.creditCardStatementPDF),
-      endYPadding: -3,
-    };
-    this.creditCardStatementCoordinates.billingPeriodStart = {
-      coordinates: await findTextCoordinates(file, 'Período Facturado', this.creditCardStatementPDF),
-      startXPadding: 62,
-      endXPadding: 108,
-    };
-    this.creditCardStatementCoordinates.billingPeriodEnd = {
-      coordinates: await findTextCoordinates(file, 'Período Facturado', this.creditCardStatementPDF),
-      startXPadding: 136,
-      endXPadding: 180,
-    };
-    this.creditCardStatementCoordinates.dueDateCoordinates = {
-      coordinates: await findTextCoordinates(file, 'Pagar Hasta', this.creditCardStatementPDF),
-      startXPadding: 164,
-      endXPadding: 170,
-    };
-    this.creditCardStatementCoordinates.dueAmountCoordinates = {
-      coordinates: await findTextCoordinates(file, 'Monto Total Facturado', this.creditCardStatementPDF),
-      startXPadding: 190,
-      endXPadding: 150,
-    };
-    this.creditCardStatementCoordinates.minimumPaymentCoordinates = {
-      coordinates: await findTextCoordinates(file, 'Monto Mínimo a Pagar', this.creditCardStatementPDF),
-      endYPadding: 10,
-    };
-    this.creditCardStatementCoordinates.previousStatementBilledAmountCoordinates = {
-      coordinates: await findTextCoordinates(file, 'Monto Facturado Período Anterior ', this.creditCardStatementPDF),
-      startXPadding: 385,
-      endXPadding: 440,
-    };
-    this.creditCardStatementCoordinates.previousStatementPaidAmountCoordinates = {
-      coordinates: await findTextCoordinates(file, 'Monto Pagado Período Anterior ', this.creditCardStatementPDF),
-      startXPadding: 385,
-      endXPadding: 440,
-    };
-    this.creditCardStatementCoordinates.transactionsTable = {
-      coordinates: await findTextCoordinates(file, '2. Período Actual', this.creditCardStatementPDF, false),
-      endYPadding: 0,
-    };
-    this.creditCardStatementCoordinates.transactionsEnd = {
-      coordinates: await findTextCoordinates(file, 'III. INFORMACIÓN DE PAGO', this.creditCardStatementPDF),
-      endYPadding: 0,
-    };
-    this.bankToParse = CreditCardStatementBanks.LiderBCI;
+    if (!config.configuration) {
+      throw new HttpException(
+        `No se encontró configuración de parseo para ${this.bankToParse}`,
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    const configKeys = Object.keys(config.configuration) as Array<keyof CreditCardStatementCoordinates>;
+
+    for (const key of configKeys) {
+      const coordinateConfig = config.configuration[key];
+
+      if (coordinateConfig && typeof coordinateConfig === 'object') {
+        const text = coordinateConfig.text ?? '';
+        const stopOnFirstMatch = coordinateConfig.stopOnFirstMatch ?? true;
+
+        this.creditCardStatementCoordinates[key] = {
+          ...coordinateConfig,
+          text,
+          coordinates: await findTextCoordinates(file, text, this.creditCardStatementPDF, stopOnFirstMatch),
+        } as TransactionCoordinatesWithPadding;
+      }
+    }
   }
 
   async extractAndParseTransactions(file: Express.Multer.File): Promise<ParsedStatement> {
@@ -395,7 +339,7 @@ export class CreditCardStatementService {
             (this.creditCardStatementCoordinates.previousStatementBilledAmountCoordinates.endXPadding ?? 0),
         ),
       );
-      const previousStatementBilledAmount = this.parseAmount(
+      const previousStatementBilledAmount = parseAmount(
         new RegExp(/\$\s*(-?[\d.,]+)/).exec(previousStatementBilledAmountText)?.[0] ?? '',
       );
 
@@ -423,7 +367,7 @@ export class CreditCardStatementService {
         ),
       );
 
-      const previousStatementPaidAmount = this.parseAmount(
+      const previousStatementPaidAmount = parseAmount(
         new RegExp(/\$\s*(-?[\d.,]+)/).exec(previousStatementPaidAmountText)?.[0] ?? '',
       );
 
@@ -694,7 +638,7 @@ export class CreditCardStatementService {
       if (creditCardsMap.has(match[1].slice(-4))) {
         accumulator.push({
           number: match[1],
-          parsedTotal: this.parseAmount(match[2]),
+          parsedTotal: parseAmount(match[2]),
           index: match.index,
         });
       } else {
@@ -710,14 +654,14 @@ export class CreditCardStatementService {
     creditCardsMatches.sort((a, b) => a.index - b.index);
 
     const parsedTotalOperations =
-      (totalPaymentsMatch ? this.parseAmount(totalPaymentsMatch[1]) : 0) +
-      (totalPATMatch ? this.parseAmount(totalPATMatch[1]) : 0) +
+      (totalPaymentsMatch ? parseAmount(totalPaymentsMatch[1]) : 0) +
+      (totalPATMatch ? parseAmount(totalPATMatch[1]) : 0) +
       creditCardsMatches.reduce((sum, card) => sum + card.parsedTotal, 0) +
-      this.parseAmount(totalInstallmentsMatch?.[1] ?? '0');
+      parseAmount(totalInstallmentsMatch?.[1] ?? '0');
 
-    const parsedTotalCharges = this.parseAmount(totalChargesMatch[1]);
+    const parsedTotalCharges = parseAmount(totalChargesMatch[1]);
     const parsedTotalUnbilledInstallments = totalUnbilledInstallmentsMatch
-      ? this.parseAmount(totalUnbilledInstallmentsMatch[1])
+      ? parseAmount(totalUnbilledInstallmentsMatch[1])
       : 0;
 
     const location = String.raw`([A-Z]+(?:\s+[A-Z]+)*)?`; // Uppercase words with spaces, optional
@@ -748,9 +692,9 @@ export class CreditCardStatementService {
       const [, location, date, code, description, operationAmount, totalAmount, installments, monthlyAmount] = match;
 
       const transactionIndex = match.index;
-      const parsedMonthlyAmount = this.parseAmount(monthlyAmount);
-      const parsedOperationAmount = this.parseAmount(operationAmount);
-      const parsedTotalAmount = this.parseAmount(totalAmount);
+      const parsedMonthlyAmount = parseAmount(monthlyAmount);
+      const parsedOperationAmount = parseAmount(operationAmount);
+      const parsedTotalAmount = parseAmount(totalAmount);
 
       const [parsedCurrentInstallment, parsedTotalInstallments] = installments
         .split('/')
@@ -866,9 +810,9 @@ export class CreditCardStatementService {
       billingPeriodStart: billingPeriodStart,
       billingPeriodEnd: billingPeriodEnd,
       dueDate: parse(dueDateMatch[0], 'dd/MM/yyyy', new Date()),
-      dueAmount: this.parseAmount(dueAmountMatch[1]),
-      minimumPayment: this.parseAmount(minimumPaymentMatch[1]),
-      previousStatementDebt: this.parseAmount(previousStatementDebtMatch[1]),
+      dueAmount: parseAmount(dueAmountMatch[1]),
+      minimumPayment: parseAmount(minimumPaymentMatch[1]),
+      previousStatementDebt: parseAmount(previousStatementDebtMatch[1]),
       totalOperations: totalCalculatedOperations,
       totalPayments,
       totalPAT,
@@ -906,19 +850,7 @@ export class CreditCardStatementService {
   ): Promise<ParsedStatement> {
     const transactionsMap: Map<string, TransactionCategory> = new Map();
 
-    let mainCreditCardNumberMatch: RegExpExecArray | null = null;
-    let billingPeriodMatchStartEnd: string[] = [];
-    let dueDateMatch: RegExpExecArray | null = null;
-    let dueAmountMatch: RegExpExecArray | null = null;
-    let minimumPaymentMatch: RegExpExecArray | null = null;
-
-    for (const text of mainCreditCard) {
-      const match = new RegExp(/\d{4}(?=\D*$)/).exec(text);
-      if (match) {
-        mainCreditCardNumberMatch = match;
-        break;
-      }
-    }
+    const mainCreditCardNumberMatch = matchTextWithPattern(mainCreditCard, new RegExp(/\d{4}(?=\D*$)/));
     if (!mainCreditCardNumberMatch) {
       throw new HttpException(
         'No se pudo extraer el número de tarjeta de crédito principal',
@@ -926,65 +858,35 @@ export class CreditCardStatementService {
       );
     }
 
-    for (const text of billingPeriodStartEnd) {
-      const match = text.match(/\d{2}[-/]\d{2}[-/]\d{4}/g);
-      if (match) {
-        billingPeriodMatchStartEnd.push(...match);
-      }
-    }
+    const billingPeriodMatchStartEnd: string[] = matchMultipleTextWithPattern(
+      billingPeriodStartEnd,
+      new RegExp(/\d{2}[-/]\d{2}[-/]\d{4}/g),
+    );
     if (billingPeriodMatchStartEnd.length === 0) {
       throw new HttpException('No se pudo extraer el período facturado', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
-    for (const text of dueDateText) {
-      const match = new RegExp(/\d{2}\/\d{2}\/\d{4}/).exec(text);
-      if (match) {
-        dueDateMatch = match;
-        break;
-      }
-    }
+    const dueDateMatch: RegExpExecArray | null = matchTextWithPattern(dueDateText, new RegExp(/\d{2}\/\d{2}\/\d{4}/));
     if (!dueDateMatch) {
       throw new HttpException('No se pudo extraer la fecha de vencimiento', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
-    for (const text of dueAmountText) {
-      const match = new RegExp(/\$\s*(-?[\d.,]+)/).exec(text);
-      if (match) {
-        dueAmountMatch = match;
-        break;
-      }
-    }
+    const dueAmountMatch: RegExpExecArray | null = matchTextWithPattern(dueAmountText, new RegExp(/\$\s*(-?[\d.,]+)/));
     if (!dueAmountMatch) {
       throw new HttpException('No se pudo extraer el monto a pagar', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
-    for (const text of minimumPaymentCoordinatesText) {
-      const match = new RegExp(/\$\s*(-?[\d.,]+)/).exec(text);
-      if (match) {
-        minimumPaymentMatch = match;
-        break;
-      }
-    }
+    const minimumPaymentMatch: RegExpExecArray | null = matchTextWithPattern(
+      minimumPaymentCoordinatesText,
+      new RegExp(/\$\s*(-?[\d.,]+)/),
+    );
     if (!minimumPaymentMatch) {
       throw new HttpException('No se pudo extraer el pago mínimo', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
-    const creditCards = await this.txHost.tx.find(PaymentMethod, {
-      select: {
-        id: true,
-        name: true,
-      },
-      where: {
-        createdById: 'c3983079-8ad2-4057-aa26-5418e1003563',
-      },
-    });
-
-    const creditCardsMap = new Map<string, PaymentMethod>();
-    for (const card of creditCards) {
-      if (!creditCardsMap.has(card.name)) {
-        creditCardsMap.set(card.name, card);
-      }
-    }
+    const creditCardsMap = await this.paymentMethodService.getActivePaymentMethodsMap(
+      'c3983079-8ad2-4057-aa26-5418e1003563',
+    );
 
     const mainCreditCardId = creditCardsMap.get(mainCreditCardNumberMatch[0])?.id;
 
@@ -997,85 +899,24 @@ export class CreditCardStatementService {
     const billingPeriodStart = parse(normalizeDateString(billingPeriodMatchStartEnd[0]), 'dd-MM-yyyy', new Date());
     const billingPeriodEnd = parse(normalizeDateString(billingPeriodMatchStartEnd[1]), 'dd-MM-yyyy', new Date());
 
-    const checkRepeatedStatement = await this.creditCardStatementRepository.exists({
-      where: {
-        creditCardId: mainCreditCardId,
-        billingPeriodStart: billingPeriodStart,
-        billingPeriodEnd: billingPeriodEnd,
-      },
-    });
+    const checkRepeatedStatement = await this.checkIfStatementExists(
+      mainCreditCardId,
+      billingPeriodStart,
+      billingPeriodEnd,
+    );
 
     if (checkRepeatedStatement) {
       throw new HttpException('Estado de cuenta ya existe', HttpStatus.NOT_ACCEPTABLE);
     }
 
-    // Section markers to help categorize transactions
-    const sectionMarkers = {
-      // Match LIDER when it appears after "Total Operaciones" and before a location
-      lider: /1\.\s*Total Operaciones\s+LIDER/m,
-
-      // Match OTROS COMERCIOS as a section header
-      otrosComerciosStart: /OTROS COMERCIOS\s+[A-Z]/m,
-
-      // Products section
-      productosServicios: /2\.\s*Productos o Servicios Voluntariamente Contratados/m,
-
-      // Charges section
-      cargosComisiones: /3\.\s*Cargos.*Comisiones.*Impuestos.*Abonos/m,
-
-      // PAGO with date before it
-      pagoMarker: /\d{2}\/\d{2}\/\d{4}\s+PAGO/m,
-    };
-
-    // Pattern to match totals: $ amount that is preceded by another $ amount
-    const totalPattern = /\$\s+[-]?\d{1,3}(?:\.\d{3})*\s+\$\s+([-]?\d{1,3}(?:\.\d{3})*)/gm;
-
-    // Find section markers with their positions
-    const liderMatch = sectionMarkers.lider.exec(allTransactionsText);
-    const otrosComerciosMatch = sectionMarkers.otrosComerciosStart.exec(allTransactionsText);
-    const productosServiciosMatch = sectionMarkers.productosServicios.exec(allTransactionsText);
-    const cargosComisionesMatch = sectionMarkers.cargosComisiones.exec(allTransactionsText);
-    const pagoMatch = sectionMarkers.pagoMarker.exec(allTransactionsText);
-
-    // Get all totals
-    const allTotals = this.findTotals(allTransactionsText, totalPattern);
-
-    // Categorize all totals in a single pass using reduce
-    const categorizedTotals = allTotals.reduce(
-      (acc, total) => {
-        if (
-          liderMatch &&
-          otrosComerciosMatch &&
-          total.index > liderMatch.index &&
-          total.index < otrosComerciosMatch.index
-        ) {
-          acc.liderParsedTotals.push(total);
-        } else if (
-          otrosComerciosMatch &&
-          productosServiciosMatch &&
-          total.index > otrosComerciosMatch.index &&
-          total.index < productosServiciosMatch.index
-        ) {
-          acc.otrosComerciosParsedTotals.push(total);
-        } else if (
-          cargosComisionesMatch &&
-          pagoMatch &&
-          total.index > cargosComisionesMatch.index &&
-          total.index < pagoMatch.index
-        ) {
-          acc.cargosParsedTotals.push(total);
-        } else if (pagoMatch && total.index > pagoMatch.index) {
-          acc.pagoParsedTotals.push(total);
-        }
-        return acc;
-      },
-      {
-        liderParsedTotals: [] as TotalMatch[],
-        otrosComerciosParsedTotals: [] as TotalMatch[],
-        cargosParsedTotals: [] as TotalMatch[],
-        pagoParsedTotals: [] as TotalMatch[],
-      },
-    );
+    const {
+      categorizedTotals,
+      liderMatch,
+      otrosComerciosMatch,
+      productosServiciosMatch,
+      cargosComisionesMatch,
+      pagoMatch,
+    } = this.categorizeLiderBciTotals(allTransactionsText);
 
     const { liderParsedTotals, otrosComerciosParsedTotals, cargosParsedTotals, pagoParsedTotals } = categorizedTotals;
 
@@ -1099,135 +940,26 @@ export class CreditCardStatementService {
 
     const transactionMatches = allTransactionsText.matchAll(transactionPattern);
 
-    let totalLiderMain = 0;
-    let totalLiderAdditional = 0;
-    let totalOtrosComerciosMain = 0;
-    let totalOtrosComerciosAdditional = 0;
-    let totalCargosComisiones = 0;
-    let totalInstallments = 0;
-    let totalPago = 0;
-
-    for (const match of transactionMatches) {
-      const [, location, date, description, operationAmount, totalAmount, installments, monthlyAmount] = match;
-
-      const transactionIndex = match.index;
-      const parsedOperationAmount = this.parseAmount(operationAmount);
-
-      // Determine if it's a regular (T) or additional card (A) transaction
-      const isAdditionalCard = description.includes('(A)');
-
-      // Parse installment data if present
-      let parsedCurrentInstallment = 1;
-      let parsedTotalInstallments = 1;
-      let parsedMonthlyAmount = parsedOperationAmount;
-      let parsedTotalAmount = parsedOperationAmount;
-
-      if (installments && monthlyAmount && totalAmount) {
-        [parsedCurrentInstallment, parsedTotalInstallments] = installments
-          .split('/')
-          .map((installment) => Number.parseInt(installment));
-        parsedMonthlyAmount = this.parseAmount(monthlyAmount);
-        parsedTotalAmount = this.parseAmount(totalAmount);
-        totalInstallments += parsedMonthlyAmount;
-      }
-
-      const transaction: Transaction = {
-        location: location || 'N/A',
-        date: date,
-        description: description.trim(),
-        operationAmount: parsedOperationAmount,
-        totalAmount: parsedTotalAmount,
-        currentInstallment: parsedCurrentInstallment,
-        totalInstallments: parsedTotalInstallments,
-        monthlyAmount: parsedMonthlyAmount,
-        reference: '',
-        referenceCode: '',
-        creditCard: isAdditionalCard ? 'ADDITIONAL' : 'MAIN',
-      };
-
-      // Categorize based on position relative to totals
-      if (
-        liderMatch &&
-        otrosComerciosMatch &&
-        transactionIndex >= liderMatch.index &&
-        transactionIndex < otrosComerciosMatch.index
-      ) {
-        if (isAdditionalCard) {
-          // Find the additional card total (second total in LIDER section)
-          const additionalTotal = liderParsedTotals.find((t) => t.index > transactionIndex);
-          totalLiderAdditional += parsedMonthlyAmount;
-
-          this.addTransactionToCategory(
-            transactionsMap,
-            { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
-            additionalTotal?.parsedAmount || 0,
-            parsedMonthlyAmount,
-          );
-        } else {
-          // Find the main card total (first total in LIDER section)
-          const mainTotal = liderParsedTotals.find((t) => t.index > transactionIndex);
-          totalLiderMain += parsedMonthlyAmount;
-
-          this.addTransactionToCategory(
-            transactionsMap,
-            { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
-            mainTotal?.parsedAmount || 0,
-            parsedMonthlyAmount,
-          );
-        }
-      } else if (
-        otrosComerciosMatch &&
-        productosServiciosMatch &&
-        transactionIndex >= otrosComerciosMatch.index &&
-        transactionIndex < productosServiciosMatch.index
-      ) {
-        if (isAdditionalCard) {
-          // Find the additional card total in OTROS COMERCIOS section
-          const additionalTotal = otrosComerciosParsedTotals.find((t) => t.index > transactionIndex);
-          totalOtrosComerciosAdditional += parsedMonthlyAmount;
-
-          this.addTransactionToCategory(
-            transactionsMap,
-            { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
-            additionalTotal?.parsedAmount || 0,
-            parsedMonthlyAmount,
-          );
-        } else {
-          // Find the main card total in OTROS COMERCIOS section
-          const mainTotal = otrosComerciosParsedTotals.find((t) => t.index > transactionIndex);
-          totalOtrosComerciosMain += parsedMonthlyAmount;
-
-          this.addTransactionToCategory(
-            transactionsMap,
-            { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
-            mainTotal?.parsedAmount || 0,
-            parsedMonthlyAmount,
-          );
-        }
-      } else if (
-        cargosComisionesMatch &&
-        transactionIndex >= cargosComisionesMatch.index &&
-        transactionIndex < pagoMatch!.index - 20
-      ) {
-        totalCargosComisiones += parsedMonthlyAmount;
-
-        this.addTransactionToCategory(
-          transactionsMap,
-          { ...transaction, reference: CreditCardStatementReferencesEnum.CHARGE },
-          cargosParsedTotals[0]?.parsedAmount || 0,
-          parsedMonthlyAmount,
-        );
-      } else if (pagoMatch && transactionIndex >= pagoMatch.index - 20) {
-        totalPago += parsedMonthlyAmount;
-
-        this.addTransactionToCategory(
-          transactionsMap,
-          { ...transaction, reference: CreditCardStatementReferencesEnum.PAYMENT },
-          pagoParsedTotals[0]?.parsedAmount || 0,
-          parsedMonthlyAmount,
-        );
-      }
-    }
+    const {
+      totalLiderMain,
+      totalLiderAdditional,
+      totalOtrosComerciosMain,
+      totalOtrosComerciosAdditional,
+      totalCargosComisiones,
+      totalPago,
+      totalInstallments,
+    } = this.categorizeLiderBciTransactions(
+      transactionMatches,
+      {
+        liderMatch,
+        otrosComerciosMatch,
+        productosServiciosMatch,
+        cargosComisionesMatch,
+        pagoMatch,
+      },
+      categorizedTotals,
+      transactionsMap,
+    );
 
     liderParsedTotals.forEach((total, index) => {
       const isMainCard = index === 0;
@@ -1273,8 +1005,8 @@ export class CreditCardStatementService {
       billingPeriodStart: billingPeriodStart,
       billingPeriodEnd: billingPeriodEnd,
       dueDate: parse(dueDateMatch[0], 'dd/MM/yyyy', new Date()),
-      dueAmount: this.parseAmount(dueAmountMatch[1]),
-      minimumPayment: this.parseAmount(minimumPaymentMatch[1]),
+      dueAmount: parseAmount(dueAmountMatch[1]),
+      minimumPayment: parseAmount(minimumPaymentMatch[1]),
       previousStatementDebt: previousStatementDebt,
       totalOperations: totalLiderMain + totalLiderAdditional + totalOtrosComerciosMain + totalOtrosComerciosAdditional,
       totalPayments: totalPago,
@@ -1302,7 +1034,349 @@ export class CreditCardStatementService {
     };
   }
 
-  findTotals(text: string, totalPattern: RegExp): TotalMatch[] {
+  private categorizeLiderBciTransactions(
+    transactionMatches: RegExpStringIterator<RegExpExecArray>,
+    totalsMatches: {
+      liderMatch: RegExpExecArray | null;
+      otrosComerciosMatch: RegExpExecArray | null;
+      productosServiciosMatch: RegExpExecArray | null;
+      cargosComisionesMatch: RegExpExecArray | null;
+      pagoMatch: RegExpExecArray | null;
+    },
+    categorizedTotals: {
+      liderParsedTotals: TotalMatch[];
+      otrosComerciosParsedTotals: TotalMatch[];
+      cargosParsedTotals: TotalMatch[];
+      pagoParsedTotals: TotalMatch[];
+    },
+    transactionsMap: Map<string, TransactionCategory>,
+  ) {
+    let totalLiderMain = 0;
+    let totalLiderAdditional = 0;
+    let totalOtrosComerciosMain = 0;
+    let totalOtrosComerciosAdditional = 0;
+    let totalCargosComisiones = 0;
+    let totalInstallments = 0;
+    let totalPago = 0;
+
+    const { liderParsedTotals, otrosComerciosParsedTotals, cargosParsedTotals, pagoParsedTotals } = categorizedTotals;
+    const { liderMatch, otrosComerciosMatch, productosServiciosMatch, cargosComisionesMatch, pagoMatch } =
+      totalsMatches;
+
+    for (const match of transactionMatches) {
+      const [, location, date, description, operationAmount, totalAmount, installments, monthlyAmount] = match;
+
+      const transactionIndex = match.index;
+      const parsedOperationAmount = parseAmount(operationAmount);
+
+      // Determine if it's a regular (T) or additional card (A) transaction
+      const isAdditionalCard = description.includes('(A)');
+
+      // Parse installment data if present
+      let parsedCurrentInstallment = 1;
+      let parsedTotalInstallments = 1;
+      let parsedMonthlyAmount = parsedOperationAmount;
+      let parsedTotalAmount = parsedOperationAmount;
+
+      if (installments && monthlyAmount && totalAmount) {
+        [parsedCurrentInstallment, parsedTotalInstallments] = installments
+          .split('/')
+          .map((installment) => Number.parseInt(installment));
+        parsedMonthlyAmount = parseAmount(monthlyAmount);
+        parsedTotalAmount = parseAmount(totalAmount);
+        totalInstallments += parsedMonthlyAmount;
+      }
+
+      const transaction: Transaction = {
+        location: location || 'N/A',
+        date: date,
+        description: description.trim(),
+        operationAmount: parsedOperationAmount,
+        totalAmount: parsedTotalAmount,
+        currentInstallment: parsedCurrentInstallment,
+        totalInstallments: parsedTotalInstallments,
+        monthlyAmount: parsedMonthlyAmount,
+        reference: '',
+        referenceCode: '',
+        creditCard: isAdditionalCard ? 'ADDITIONAL' : 'MAIN',
+      };
+
+      // Categorize based on position relative to totals
+      if (
+        liderMatch &&
+        otrosComerciosMatch &&
+        transactionIndex >= liderMatch.index &&
+        transactionIndex < otrosComerciosMatch.index
+      ) {
+        if (isAdditionalCard) {
+          this.addAdditionalCardTransactionToLiderBciCategory(
+            liderParsedTotals,
+            transactionIndex,
+            parsedMonthlyAmount,
+            transactionsMap,
+            transaction,
+            { totalLiderMain, totalLiderAdditional },
+          );
+          totalLiderAdditional += parsedMonthlyAmount;
+        } else {
+          this.addMainCardTransactionToLiderBciCategory(
+            liderParsedTotals,
+            transactionIndex,
+            parsedMonthlyAmount,
+            transactionsMap,
+            transaction,
+            { totalLiderMain, totalLiderAdditional },
+          );
+          totalLiderMain += parsedMonthlyAmount;
+        }
+      } else if (
+        otrosComerciosMatch &&
+        productosServiciosMatch &&
+        transactionIndex >= otrosComerciosMatch.index &&
+        transactionIndex < productosServiciosMatch.index
+      ) {
+        if (isAdditionalCard) {
+          this.addAdditionalCardTransactionToOtrosComerciosCategory(
+            otrosComerciosParsedTotals,
+            transactionIndex,
+            parsedMonthlyAmount,
+            transactionsMap,
+            transaction,
+            { totalOtrosComerciosMain, totalOtrosComerciosAdditional },
+          );
+          totalOtrosComerciosAdditional += parsedMonthlyAmount;
+        } else {
+          this.addMainCardTransactionToOtrosComerciosCategory(
+            otrosComerciosParsedTotals,
+            transactionIndex,
+            parsedMonthlyAmount,
+            transactionsMap,
+            transaction,
+            { totalOtrosComerciosMain, totalOtrosComerciosAdditional },
+          );
+          totalOtrosComerciosMain += parsedMonthlyAmount;
+        }
+      } else if (
+        cargosComisionesMatch &&
+        transactionIndex >= cargosComisionesMatch.index &&
+        transactionIndex < pagoMatch!.index - 20
+      ) {
+        totalCargosComisiones += parsedMonthlyAmount;
+
+        this.addTransactionToCategory(
+          transactionsMap,
+          { ...transaction, reference: CreditCardStatementReferencesEnum.CHARGE },
+          cargosParsedTotals[0]?.parsedAmount || 0,
+          parsedMonthlyAmount,
+        );
+      } else if (pagoMatch && transactionIndex >= pagoMatch.index - 20) {
+        totalPago += parsedMonthlyAmount;
+
+        this.addTransactionToCategory(
+          transactionsMap,
+          { ...transaction, reference: CreditCardStatementReferencesEnum.PAYMENT },
+          pagoParsedTotals[0]?.parsedAmount || 0,
+          parsedMonthlyAmount,
+        );
+      }
+    }
+    return {
+      totalLiderMain,
+      totalLiderAdditional,
+      totalOtrosComerciosMain,
+      totalOtrosComerciosAdditional,
+      totalCargosComisiones,
+      totalInstallments,
+      totalPago,
+    };
+  }
+
+  private parseLiderBciInstallmentTransaction(
+    parsedOperationAmount: number,
+    installments: string | undefined,
+    monthlyAmount: string | undefined,
+    totalAmount: string | undefined,
+    totalInstallments: number,
+  ) {
+    let parsedCurrentInstallment = 1;
+    let parsedTotalInstallments = 1;
+    let parsedMonthlyAmount = parsedOperationAmount;
+    let parsedTotalAmount = parsedOperationAmount;
+
+    if (installments && monthlyAmount && totalAmount) {
+      [parsedCurrentInstallment, parsedTotalInstallments] = installments
+        .split('/')
+        .map((installment) => Number.parseInt(installment));
+      parsedMonthlyAmount = parseAmount(monthlyAmount);
+      parsedTotalAmount = parseAmount(totalAmount);
+      totalInstallments += parsedMonthlyAmount;
+    }
+    return {
+      parsedCurrentInstallment,
+      parsedTotalInstallments,
+      parsedMonthlyAmount,
+      parsedTotalAmount,
+      totalInstallments,
+    };
+  }
+
+  private addMainCardTransactionToLiderBciCategory(
+    liderParsedTotals: TotalMatch[],
+    transactionIndex: number,
+    parsedMonthlyAmount: number,
+    transactionsMap: Map<string, TransactionCategory>,
+    transaction: Transaction,
+    totals: { totalLiderMain: number; totalLiderAdditional: number },
+  ) {
+    // Find the main card total (first total in LIDER section)
+    const mainTotal = liderParsedTotals.find((t) => t.index > transactionIndex);
+    totals.totalLiderMain += parsedMonthlyAmount;
+
+    this.addTransactionToCategory(
+      transactionsMap,
+      { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
+      mainTotal?.parsedAmount || 0,
+      parsedMonthlyAmount,
+    );
+  }
+
+  private addAdditionalCardTransactionToLiderBciCategory(
+    liderParsedTotals: TotalMatch[],
+    transactionIndex: number,
+    parsedMonthlyAmount: number,
+    transactionsMap: Map<string, TransactionCategory>,
+    transaction: Transaction,
+    totals: { totalLiderMain: number; totalLiderAdditional: number },
+  ) {
+    // Find the additional card total (second total in LIDER section)
+    const additionalTotal = liderParsedTotals.find((t) => t.index > transactionIndex);
+    totals.totalLiderAdditional += parsedMonthlyAmount;
+
+    this.addTransactionToCategory(
+      transactionsMap,
+      { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
+      additionalTotal?.parsedAmount || 0,
+      parsedMonthlyAmount,
+    );
+  }
+
+  private addMainCardTransactionToOtrosComerciosCategory(
+    otrosComerciosParsedTotals: TotalMatch[],
+    transactionIndex: number,
+    parsedMonthlyAmount: number,
+    transactionsMap: Map<string, TransactionCategory>,
+    transaction: Transaction,
+    totals: { totalOtrosComerciosMain: number; totalOtrosComerciosAdditional: number },
+  ) {
+    // Find the main card total in OTROS COMERCIOS section
+    const mainTotal = otrosComerciosParsedTotals.find((t) => t.index > transactionIndex);
+    totals.totalOtrosComerciosMain += parsedMonthlyAmount;
+
+    this.addTransactionToCategory(
+      transactionsMap,
+      { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
+      mainTotal?.parsedAmount || 0,
+      parsedMonthlyAmount,
+    );
+  }
+
+  private addAdditionalCardTransactionToOtrosComerciosCategory(
+    otrosComerciosParsedTotals: TotalMatch[],
+    transactionIndex: number,
+    parsedMonthlyAmount: number,
+    transactionsMap: Map<string, TransactionCategory>,
+    transaction: Transaction,
+    totals: { totalOtrosComerciosMain: number; totalOtrosComerciosAdditional: number },
+  ) {
+    // Find the additional card total in OTROS COMERCIOS section
+    const additionalTotal = otrosComerciosParsedTotals.find((t) => t.index > transactionIndex);
+    totals.totalOtrosComerciosAdditional += parsedMonthlyAmount;
+
+    this.addTransactionToCategory(
+      transactionsMap,
+      { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
+      additionalTotal?.parsedAmount || 0,
+      parsedMonthlyAmount,
+    );
+  }
+
+  private categorizeLiderBciTotals(text: string) {
+    // Section markers to help categorize transactions
+    const sectionMarkers = {
+      // Match LIDER when it appears after "Total Operaciones" and before a location
+      lider: /1\.\s*Total Operaciones\s+LIDER/m,
+
+      // Match OTROS COMERCIOS as a section header
+      otrosComerciosStart: /OTROS COMERCIOS\s+[A-Z]/m,
+
+      // Products section
+      productosServicios: /2\.\s*Productos o Servicios Voluntariamente Contratados/m,
+
+      // Charges section
+      cargosComisiones: /3\.\s*Cargos.*Comisiones.*Impuestos.*Abonos/m,
+
+      // PAGO with date before it
+      pagoMarker: /\d{2}\/\d{2}\/\d{4}\s+PAGO/m,
+    };
+
+    // Pattern to match totals: $ amount that is preceded by another $ amount
+    const totalPattern = /\$\s+-?\d{1,3}(?:\.\d{3})*\s+\$\s+(-?\d{1,3}(?:\.\d{3})*)/gm;
+
+    // Find section markers with their positions
+    const liderMatch = sectionMarkers.lider.exec(text);
+    const otrosComerciosMatch = sectionMarkers.otrosComerciosStart.exec(text);
+    const productosServiciosMatch = sectionMarkers.productosServicios.exec(text);
+    const cargosComisionesMatch = sectionMarkers.cargosComisiones.exec(text);
+    const pagoMatch = sectionMarkers.pagoMarker.exec(text);
+
+    const allTotals = this.findLiderBciTotals(text, totalPattern);
+
+    const categorizedTotals = allTotals.reduce(
+      (accumulator, total) => {
+        if (
+          liderMatch &&
+          otrosComerciosMatch &&
+          total.index > liderMatch.index &&
+          total.index < otrosComerciosMatch.index
+        ) {
+          accumulator.liderParsedTotals.push(total);
+        } else if (
+          otrosComerciosMatch &&
+          productosServiciosMatch &&
+          total.index > otrosComerciosMatch.index &&
+          total.index < productosServiciosMatch.index
+        ) {
+          accumulator.otrosComerciosParsedTotals.push(total);
+        } else if (
+          cargosComisionesMatch &&
+          pagoMatch &&
+          total.index > cargosComisionesMatch.index &&
+          total.index < pagoMatch.index
+        ) {
+          accumulator.cargosParsedTotals.push(total);
+        } else if (pagoMatch && total.index > pagoMatch.index) {
+          accumulator.pagoParsedTotals.push(total);
+        }
+        return accumulator;
+      },
+      {
+        liderParsedTotals: [] as TotalMatch[],
+        otrosComerciosParsedTotals: [] as TotalMatch[],
+        cargosParsedTotals: [] as TotalMatch[],
+        pagoParsedTotals: [] as TotalMatch[],
+      },
+    );
+    return {
+      categorizedTotals,
+      liderMatch,
+      otrosComerciosMatch,
+      productosServiciosMatch,
+      cargosComisionesMatch,
+      pagoMatch,
+    };
+  }
+
+  private findLiderBciTotals(text: string, totalPattern: RegExp): TotalMatch[] {
     const totals: TotalMatch[] = [];
     const matches = text.matchAll(totalPattern);
 
@@ -1319,7 +1393,7 @@ export class CreditCardStatementService {
         if (!hasInstallmentAfter) {
           totals.push({
             amount: match[1],
-            parsedAmount: this.parseAmount(match[1]),
+            parsedAmount: parseAmount(match[1]),
             index: match.index + match[0].indexOf('$', 1),
           });
         }
@@ -1328,13 +1402,6 @@ export class CreditCardStatementService {
 
     return totals;
   }
-
-  private parseAmount(amountStr: string): number {
-    // Remove currency symbols, spaces, thousand separators, and convert Chilean decimal format
-    // Chilean format: 1.234.567,89 or -1.234.567,89
-    return Number.parseFloat(amountStr.replace(/[$\s.,]/g, (match) => (match === ',' ? '.' : '')));
-  }
-
   private addTransactionToCategory(
     transactionsMap: Map<string, TransactionCategory>,
     transaction: Transaction,
@@ -1351,6 +1418,16 @@ export class CreditCardStatementService {
       category.parsedTotal = parsedTotalAmount;
       category.calculatedTotal += parsedMonthlyAmount;
     }
+  }
+
+  async checkIfStatementExists(mainCreditCardId: string, billingPeriodStart: Date, billingPeriodEnd: Date) {
+    return await this.creditCardStatementRepository.exists({
+      where: {
+        creditCardId: mainCreditCardId,
+        billingPeriodStart: billingPeriodStart,
+        billingPeriodEnd: billingPeriodEnd,
+      },
+    });
   }
 
   /**
