@@ -12,9 +12,6 @@ import { BanksModule } from './modules/banks/banks/banks.module';
 import { BankAccountsModule } from './modules/banks/bank-accounts/bank-accounts.module';
 import { BankAccountsTypesModule } from './modules/banks/bank-accounts-types/bank-accounts-types.module';
 import { ExpensesModule } from './modules/expenses/expenses/expenses.module';
-import { ExpensesTypesModule } from './modules/expenses/expenses-types/expenses-types.module';
-import { ExpensesDescriptionsModule } from './modules/expenses/expenses-descriptions/expenses-descriptions.module';
-import { IncomeTypesModule } from './modules/incomes/income-types/income-types.module';
 import { IncomesModule } from './modules/incomes/incomes/incomes.module';
 import { getDatabaseConfig } from './database/database.config';
 import { EmailModule } from './modules/email/email.module';
@@ -22,6 +19,7 @@ import { CreditCardStatementModule } from './modules/credit-card-statement/credi
 import { ClsModule } from 'nestjs-cls';
 import { ClsPluginTransactional } from '@nestjs-cls/transactional/dist/src/lib/plugin-transactional';
 import { TransactionalAdapterTypeOrm } from '@nestjs-cls/transactional-adapter-typeorm/dist/src/lib/transactional-adapter-typeorm';
+import { CategoryModule } from '@modules/categories/category.module';
 
 @Module({
   imports: [
@@ -58,9 +56,7 @@ import { TransactionalAdapterTypeOrm } from '@nestjs-cls/transactional-adapter-t
     BankAccountsModule,
     BankAccountsTypesModule,
     ExpensesModule,
-    ExpensesTypesModule,
-    ExpensesDescriptionsModule,
-    IncomeTypesModule,
+    CategoryModule,
     IncomesModule,
     EmailModule,
     CreditCardStatementModule,

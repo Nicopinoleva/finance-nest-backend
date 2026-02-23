@@ -61,12 +61,46 @@ type BankAccount {
   updatedBy: Users
 }
 
+type CreditCardAccount {
+  id: ID!
+  limit: Int!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  creditCards: [PaymentMethod!]!
+  createdBy: Users!
+  updatedBy: Users
+}
+
 type PaymentMethod {
   id: ID!
   name: String!
   description: String
-  bankAccount: BankAccount!
+  isAdditional: Boolean!
+  order: Float!
+  isActive: Boolean!
+  bankAccount: BankAccount
   paymentMethodType: PaymentMethodTypes!
+  parentPaymentMethod: PaymentMethod
+  creditCardAccount: CreditCardAccount
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  createdBy: Users!
+  updatedBy: Users
+}
+
+type Currency {
+  id: ID!
+  numericCode: Float!
+  alphabeticCode: String!
+  name: String!
+  minorUnit: Float
+}
+
+type Category {
+  id: ID!
+  name: String!
+  description: String
+  parentCategory: Category
   createdAt: DateTime!
   updatedAt: DateTime!
   createdBy: Users!
@@ -78,40 +112,30 @@ type CreditCardStatementReference {
   name: String!
 }
 
-type ExpenseType {
-  id: ID!
-  name: String!
-  createdAt: DateTime!
-  updatedAt: DateTime!
-  createdBy: Users!
-  updatedBy: Users
-}
-
 type Expense {
   id: ID!
   description: String!
-  operationAmount: Int!
-  totalAmount: Int!
-  monthlyAmount: Int!
+  location: String
+  operationAmount: Float!
+  totalAmount: Float!
+  monthlyAmount: Float!
+  sourceCurrencyAmount: Float
   currentInstallment: Int!
   totalInstallments: Int!
-  date: Date!
+  date: DateTime!
   referenceCode: String
+  installmentsFulfilled: Boolean!
   paymentMethod: PaymentMethod!
   creditCardStatement: CreditCardStatement
   parentInstallment: Expense
-  creditCardStatementReference: CreditCardStatementReference
-  expenseType: ExpenseType!
+  creditCardStatementReference: CreditCardStatementReference!
+  currency: Currency!
+  category: Category
   createdAt: DateTime!
   updatedAt: DateTime!
   createdBy: Users!
   updatedBy: Users
 }
-
-"""
-A date string, such as 2007-12-03, compliant with the `full-date` format outlined in section 5.6 of the RFC 3339 profile of the ISO 8601 standard for representation of dates and times using the Gregorian calendar.
-"""
-scalar Date
 
 type CreditCardStatement {
   id: ID!
@@ -136,40 +160,77 @@ type CreditCardStatement {
   updatedBy: Users
 }
 
-type IncomeType {
-  id: ID!
-  name: String!
-  createdAt: DateTime!
-  updatedAt: DateTime!
-  createdBy: Users!
-  updatedBy: Users
+"""
+A date string, such as 2007-12-03, compliant with the `full-date` format outlined in section 5.6 of the RFC 3339 profile of the ISO 8601 standard for representation of dates and times using the Gregorian calendar.
+"""
+scalar Date
+
+type TransactionCategoryDto {
+  reference: String!
+  calculatedTotal: Float!
+  parsedTotal: Float!
+  transactions: [TransactionDto!]!
 }
 
-type EmailAttachment {
-  filename: String!
-  contentType: String!
-  size: Int!
+type TransactionDto {
+  date: String!
+  referenceCode: String!
+  description: String!
+  operationAmount: Float!
+  totalAmount: Float!
+  currentInstallment: Int!
+  totalInstallments: Int!
+  monthlyAmount: Float!
+  reference: String!
+  creditCard: String!
+  location: String!
 }
 
-type EmailMessage {
-  id: ID!
-  from: String!
-  to: String!
-  subject: String!
-  date: DateTime!
-  text: String!
-  html: String!
-  attachments: [EmailAttachment!]!
+type BilledStatementsDto {
+  total: Float!
+  billingPeriodStart: String!
+  billingPeriodEnd: String!
+  transactions: [TransactionCategoryDto!]!
+}
+
+type UnbilledStatementsDto {
+  total: Float!
+  unbilledPeriodStart: String
+  transactions: [TransactionCategoryDto!]!
+}
+
+type CreditCardDebtDto {
+  creditCard: String!
+  billedStatements: BilledStatementsDto
+  unbilledStatements: UnbilledStatementsDto
+}
+
+type CreditCardsDebtDto {
+  creditCards: [CreditCardDebtDto!]!
+  totalDebt: Float!
+  month: String!
 }
 
 type Query {
   sayHello: String!
-  readEmails: [EmailMessage!]!
-  searchEmails(searchCriteria: [[String!]!]!): [EmailMessage!]!
+  getCreditCardsDebt: CreditCardsDebtDto!
 }
 
 type Mutation {
+  saveUnbilledExpenses: [Expense!]!
+  createCategory(input: CreateCategoryInput!): Category!
   createIncome(input: CreateIncomeInput!): String!
+}
+
+input CreateCategoryInput {
+  """Nombre categoría"""
+  name: String!
+
+  """Descripción categoría"""
+  description: String
+
+  """ID categoría padre"""
+  parentCategoryId: ID
 }
 
 input CreateIncomeInput {

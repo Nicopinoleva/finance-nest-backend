@@ -1,14 +1,11 @@
 import { Users } from '../users/users.entity';
-import { Field, ID, Int, ObjectType } from '@nestjs/graphql';
-import { GraphQLDate, GraphQLDateTime } from 'graphql-scalars';
+import { Field, ID, ObjectType } from '@nestjs/graphql';
+import { GraphQLDateTime } from 'graphql-scalars';
 import { Column, CreateDateColumn, Entity, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
-import { BankAccount } from '../banks/bank-account.entity';
-import { Category } from '../categories/category.entity';
-import { dateTransformer } from '../../../utils/utils/transformers.utils';
 
 @Entity()
 @ObjectType()
-export class Income {
+export class Category {
   @PrimaryGeneratedColumn('uuid')
   @Field(() => ID)
   id: string;
@@ -21,21 +18,9 @@ export class Income {
   @Field(() => String, { nullable: true })
   description: string | null;
 
-  @Column({ type: 'integer' })
-  @Field(() => Int)
-  amount: number;
-
-  @CreateDateColumn({ type: 'date', transformer: dateTransformer })
-  @Field(() => GraphQLDate)
-  date: Date;
-
-  @ManyToOne(() => BankAccount)
-  @Field(() => BankAccount)
-  bankAccount: BankAccount;
-
-  @ManyToOne(() => Category)
-  @Field(() => Category)
-  category: Category;
+  @ManyToOne(() => Category, { nullable: true })
+  @Field(() => Category, { nullable: true })
+  parentCategory: Category | null;
 
   @CreateDateColumn({ type: 'timestamp with time zone', precision: 3 })
   @Field(() => GraphQLDateTime)
@@ -45,11 +30,8 @@ export class Income {
   @Field(() => GraphQLDateTime)
   updatedAt: Date;
 
-  @Column({ type: 'uuid' })
-  bankAccountId: string;
-
-  @Column({ type: 'uuid' })
-  categoryId: string;
+  @Column({ type: 'uuid', nullable: true })
+  parentCategoryId: string | null;
 
   @ManyToOne(() => Users)
   @Field(() => Users)

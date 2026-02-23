@@ -1,11 +1,14 @@
 import { Users } from '../users/users.entity';
-import { Field, ID, Int, ObjectType } from '@nestjs/graphql';
-import { GraphQLDate, GraphQLDateTime } from 'graphql-scalars';
+import { Field, Float, ID, Int, ObjectType } from '@nestjs/graphql';
+import { GraphQLDateTime } from 'graphql-scalars';
 import { Column, CreateDateColumn, Entity, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 import { PaymentMethod } from '../payment-methods/payment-method.entity';
-import { ExpenseType } from './expense-type.entity';
+import { Category } from '../categories/category.entity';
 import { CreditCardStatementReference } from '../credit-card-statement/credit-card-statement-reference.entity';
 import { CreditCardStatement } from '../credit-card-statement/credit-card-statement.entity';
+import { Currency } from '../banks/currency.entity';
+import { Decimal } from 'decimal.js';
+import { DecimalTransformer } from '@utils/utils/transformers.utils';
 
 @Entity()
 @ObjectType()
@@ -18,17 +21,25 @@ export class Expense {
   @Field(() => String)
   description: string;
 
-  @Column({ type: 'integer' })
-  @Field(() => Int)
-  operationAmount: number;
+  @Column('varchar', { nullable: true })
+  @Field(() => String, { nullable: true })
+  location: string | null;
 
-  @Column({ type: 'integer' })
-  @Field(() => Int)
-  totalAmount: number;
+  @Column({ type: 'decimal', precision: 15, scale: 4, transformer: DecimalTransformer })
+  @Field(() => Float)
+  operationAmount: Decimal;
 
-  @Column({ type: 'integer' })
-  @Field(() => Int)
-  monthlyAmount: number;
+  @Column({ type: 'decimal', precision: 15, scale: 4, transformer: DecimalTransformer })
+  @Field(() => Float)
+  totalAmount: Decimal;
+
+  @Column({ type: 'decimal', precision: 15, scale: 4, transformer: DecimalTransformer })
+  @Field(() => Float)
+  monthlyAmount: Decimal;
+
+  @Column({ type: 'decimal', precision: 15, scale: 4, nullable: true, transformer: DecimalTransformer })
+  @Field(() => Float, { nullable: true })
+  sourceCurrencyAmount: Decimal | null;
 
   @Column({ type: 'integer' })
   @Field(() => Int)
@@ -38,13 +49,17 @@ export class Expense {
   @Field(() => Int)
   totalInstallments: number;
 
-  @Column({ type: 'date' })
-  @Field(() => GraphQLDate)
+  @Column({ type: 'timestamp with time zone', precision: 3 })
+  @Field(() => GraphQLDateTime)
   date: Date;
 
   @Column('varchar', { nullable: true })
   @Field(() => String, { nullable: true })
   referenceCode: string | null;
+
+  @Column({ type: 'boolean', default: true })
+  @Field(() => Boolean)
+  installmentsFulfilled: boolean;
 
   @ManyToOne(() => PaymentMethod)
   @Field(() => PaymentMethod)
@@ -58,13 +73,17 @@ export class Expense {
   @Field(() => Expense, { nullable: true })
   parentInstallment: Expense | null;
 
-  @ManyToOne(() => CreditCardStatementReference, { nullable: true })
-  @Field(() => CreditCardStatementReference, { nullable: true })
-  creditCardStatementReference: CreditCardStatementReference | null;
+  @ManyToOne(() => CreditCardStatementReference)
+  @Field(() => CreditCardStatementReference)
+  creditCardStatementReference: CreditCardStatementReference;
 
-  @ManyToOne(() => ExpenseType)
-  @Field(() => ExpenseType)
-  expenseType: ExpenseType;
+  @ManyToOne(() => Currency)
+  @Field(() => Currency)
+  currency: Currency;
+
+  @ManyToOne(() => Category, { nullable: true })
+  @Field(() => Category, { nullable: true })
+  category: Category | null;
 
   @CreateDateColumn({ type: 'timestamp with time zone', precision: 3 })
   @Field(() => GraphQLDateTime)
@@ -77,17 +96,20 @@ export class Expense {
   @Column({ type: 'uuid' })
   paymentMethodId: string;
 
+  @Column({ type: 'uuid' })
+  currencyId: string;
+
   @Column({ type: 'uuid', nullable: true })
   creditCardStatementId: string | null;
 
   @Column({ type: 'uuid', nullable: true })
   parentInstallmentId: string | null;
 
-  @Column({ type: 'uuid' })
-  expenseTypeId: string;
-
   @Column({ type: 'uuid', nullable: true })
-  creditCardStatementReferenceId: string | null;
+  categoryId: string | null;
+
+  @Column({ type: 'uuid' })
+  creditCardStatementReferenceId: string;
 
   @ManyToOne(() => Users)
   @Field(() => Users)

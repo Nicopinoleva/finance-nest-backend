@@ -1,5 +1,4 @@
-import { DataSourceOptions } from 'typeorm';
-import { DefaultNamingStrategy, NamingStrategyInterface } from 'typeorm';
+import { DataSourceOptions, DefaultNamingStrategy, NamingStrategyInterface } from 'typeorm';
 import { snakeCase } from 'typeorm/util/StringUtils';
 import { config } from 'dotenv';
 import { entities } from './entities';
@@ -32,7 +31,7 @@ export const getDatabaseConfig = (): DataSourceOptions => {
   return {
     type: 'postgres',
     host: process.env.DB_HOST,
-    port: parseInt(process.env.DB_PORT || '5432', 10),
+    port: Number.parseInt(process.env.DB_PORT || '5432', 10),
     username: process.env.DB_USERNAME,
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,

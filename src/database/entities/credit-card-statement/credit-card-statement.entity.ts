@@ -12,6 +12,7 @@ import {
 } from 'typeorm';
 import { PaymentMethod } from '../payment-methods/payment-method.entity';
 import { Expense } from '../expenses/expense.entity';
+import { dateTransformer } from '../../../utils/utils/transformers.utils';
 
 @Entity()
 @ObjectType()
@@ -20,15 +21,15 @@ export class CreditCardStatement {
   @Field(() => ID)
   id: string;
 
-  @Column({ type: 'date' })
+  @Column({ type: 'date', transformer: dateTransformer })
   @Field(() => GraphQLDate)
   billingPeriodStart: Date;
 
-  @Column({ type: 'date' })
+  @Column({ type: 'date', transformer: dateTransformer })
   @Field(() => GraphQLDate)
   billingPeriodEnd: Date;
 
-  @Column({ type: 'date' })
+  @Column({ type: 'date', transformer: dateTransformer })
   @Field(() => GraphQLDate)
   dueDate: Date;
 

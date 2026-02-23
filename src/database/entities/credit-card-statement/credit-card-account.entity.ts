@@ -1,18 +1,27 @@
+import { PaymentMethod } from '../payment-methods/payment-method.entity';
 import { Users } from '../users/users.entity';
-import { Field, ID, ObjectType } from '@nestjs/graphql';
+import { Field, ID, Int, ObjectType } from '@nestjs/graphql';
 import { GraphQLDateTime } from 'graphql-scalars';
-import { Column, CreateDateColumn, Entity, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  ManyToOne,
+  OneToMany,
+  PrimaryGeneratedColumn,
+  UpdateDateColumn,
+} from 'typeorm';
 
 @Entity()
 @ObjectType()
-export class ExpenseType {
+export class CreditCardAccount {
   @PrimaryGeneratedColumn('uuid')
   @Field(() => ID)
   id: string;
 
-  @Column('varchar')
-  @Field(() => String)
-  name: string;
+  @Column({ type: 'integer' })
+  @Field(() => Int)
+  limit: number;
 
   @CreateDateColumn({ type: 'timestamp with time zone', precision: 3 })
   @Field(() => GraphQLDateTime)
@@ -21,6 +30,10 @@ export class ExpenseType {
   @UpdateDateColumn({ type: 'timestamp with time zone', precision: 3 })
   @Field(() => GraphQLDateTime)
   updatedAt: Date;
+
+  @OneToMany(() => PaymentMethod, (creditCards) => creditCards.creditCardAccount)
+  @Field(() => [PaymentMethod])
+  creditCards: PaymentMethod[];
 
   @ManyToOne(() => Users)
   @Field(() => Users)

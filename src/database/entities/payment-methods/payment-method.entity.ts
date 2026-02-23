@@ -4,6 +4,7 @@ import { GraphQLDateTime } from 'graphql-scalars';
 import { Column, CreateDateColumn, Entity, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 import { PaymentMethodTypes } from './payment-method-types.entity';
 import { BankAccount } from '../banks/bank-account.entity';
+import { CreditCardAccount } from '../credit-card-statement/credit-card-account.entity';
 
 @Entity()
 @ObjectType()
@@ -20,13 +21,33 @@ export class PaymentMethod {
   @Field(() => String, { nullable: true })
   description: string | null;
 
-  @ManyToOne(() => BankAccount)
-  @Field(() => BankAccount)
-  bankAccount: BankAccount;
+  @Column({ type: 'boolean', default: false })
+  @Field(() => Boolean)
+  isAdditional: boolean;
+
+  @Column({ type: 'integer' })
+  @Field(() => Number)
+  order: number;
+
+  @Column({ type: 'boolean', default: true })
+  @Field(() => Boolean)
+  isActive: boolean;
+
+  @ManyToOne(() => BankAccount, { nullable: true })
+  @Field(() => BankAccount, { nullable: true })
+  bankAccount: BankAccount | null;
 
   @ManyToOne(() => PaymentMethodTypes)
   @Field(() => PaymentMethodTypes)
   paymentMethodType: PaymentMethodTypes;
+
+  @ManyToOne(() => PaymentMethod, { nullable: true })
+  @Field(() => PaymentMethod, { nullable: true })
+  parentPaymentMethod: PaymentMethod | null;
+
+  @ManyToOne(() => CreditCardAccount, { nullable: true })
+  @Field(() => CreditCardAccount, { nullable: true })
+  creditCardAccount: CreditCardAccount | null;
 
   @CreateDateColumn({ type: 'timestamp with time zone', precision: 3 })
   @Field(() => GraphQLDateTime)
@@ -43,6 +64,15 @@ export class PaymentMethod {
   @ManyToOne(() => Users, { nullable: true })
   @Field(() => Users, { nullable: true })
   updatedBy: Users;
+
+  @Column({ type: 'uuid', nullable: true })
+  bankAccountId: string | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  parentPaymentMethodId: string | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  creditCardAccountId: string | null;
 
   @Column({ type: 'uuid' })
   createdById: string;

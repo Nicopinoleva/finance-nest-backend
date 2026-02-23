@@ -3,13 +3,17 @@ import { ConfigService } from '@nestjs/config';
 import Imap from 'imap';
 import { EmailMessage } from './email.interface';
 import { simpleParser, ParsedMail } from 'mailparser';
-import { Readable } from 'stream';
+import { Readable } from 'node:stream';
+import * as cheerio from 'cheerio';
 
-interface TransactionData {
-  date: string;
+export interface EmailTransaction {
+  date: Date;
   paymentMethodNumber: string;
   currency: string;
   amount: string;
+  location: string;
+  description: string;
+  transactionId?: string;
 }
 
 @Injectable()
@@ -65,7 +69,7 @@ export class EmailService {
             const prefix = `(#${seqno})`;
             let buffer = '';
 
-            msg.on('body', (stream, info) => {
+            msg.on('body', (stream) => {
               stream.on('data', (chunk) => {
                 buffer += chunk.toString('utf8');
               });
@@ -121,15 +125,15 @@ export class EmailService {
    * @param folder - Email folder to search in
    * @returns Array of parsed email messages matching criteria
    */
-  async searchEmails(criteria: string[][], folder: string = 'INBOX'): Promise<EmailMessage[]> {
+  async searchEmails(criteria: string[][], folder: string = 'INBOX'): Promise<ParsedMail[]> {
     return new Promise((resolve, reject) => {
-      const emails: EmailMessage[] = [];
+      const emails: ParsedMail[] = [];
       const imap = new Imap(this.imapConfig);
 
       imap.once('ready', () => {
         this.logger.log('IMAP connection established for search');
 
-        imap.openBox(folder, false, (err, box) => {
+        imap.openBox(folder, false, (err) => {
           if (err) {
             this.logger.error('Failed to open mailbox for search', err);
             imap.end();
@@ -149,8 +153,8 @@ export class EmailService {
               return resolve([]);
             }
 
-            const fetch = imap.fetch(results.slice(0, 10), {
-              bodies: 'TEXT',
+            const fetch = imap.fetch(results, {
+              bodies: '',
               struct: true,
               envelope: true,
             });
@@ -158,7 +162,7 @@ export class EmailService {
             fetch.on('message', (msg, seqno) => {
               let buffer = '';
 
-              msg.on('body', (stream, info) => {
+              msg.on('body', (stream) => {
                 stream.on('data', (chunk) => {
                   buffer += chunk.toString('utf8');
                 });
@@ -166,10 +170,9 @@ export class EmailService {
                 stream.once('end', async () => {
                   try {
                     const parsed = await this.parseEmail(buffer);
-                    this.extractTransactionData(parsed.text || '');
-                    emails.push(this.formatEmail(parsed, seqno.toString()));
-                  } catch (parseErr) {
-                    this.logger.error(`Parsing error for message ${seqno}:`, parseErr);
+                    emails.push(parsed);
+                  } catch (error_) {
+                    this.logger.error(`Parsing error for message ${seqno}:`, error_);
                   }
                 });
               });
@@ -236,52 +239,255 @@ export class EmailService {
     };
   }
 
-  /**
-   * Get emails by subject
-   * @param filters - Filters for search
-   * @param folder - Email folder to search in
-   * @returns Array of email messages matching subject
-   */
-  async filterEmails(filters: string[][], folder: string = 'INBOX'): Promise<EmailMessage[]> {
-    return this.searchEmails(filters, folder);
-  }
-
-  extractTransactionData(text: string): TransactionData | null {
+  extractEmailTransaction(html: string): EmailTransaction | null {
     // Regular expression to match the transaction pattern
-    // Looking for: "compra por US$X,XX con Tarjeta de Crédito ****XXXX en ... el DD/MM/YYYY HH:MM"
-    const transactionRegex =
-      /compra por\s+([A-Z$]+)([\d,\.]+)\s+con Tarjeta de Crédito\s+\*{4}(\d{4})\s+en.*?el\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}:\d{2})/i;
+    // Pattern: "compra por $X con Tarjeta de Cr&eacute;dito ****XXXX en [DESCRIPTION] [LOCATION] el DD/MM/YYYY HH:MM"
+
+    const $ = cheerio.load(html);
+
+    const text = $('body').text().replaceAll(/\s+/g, ' ').trim();
+
+    // Break down the regex into simpler parts to reduce complexity
+    const currencyPattern = String.raw`(US\$|\$)`;
+    const amountPattern = String.raw`([\d.,]+)`;
+    const cardPattern = String.raw`\*{4}(\d{4})`;
+    const datePattern = String.raw`(\d{2}/\d{2}/\d{4})`;
+    const timePattern = String.raw`(\d{2}:\d{2})`;
+
+    const transactionRegex = new RegExp(
+      String.raw`compra\s+por\s+${currencyPattern}\s*${amountPattern}\s+con\s+Tarjeta\s+de\s+Cr[eé]dito\s+${cardPattern}\s+en\s+(.+?)\s+el\s+${datePattern}\s+${timePattern}`,
+      'i',
+    );
 
     const match = transactionRegex.exec(text);
 
     if (!match) {
+      this.logger.warn('No transaction data found in email');
       return null;
     }
 
-    const [, currency, amount, cardNumber, date, time] = match;
+    const [, currencyWithSymbol, amount, cardNumber, locationAndDescription, date, time] = match;
 
-    this.logger.log(
-      `Extracted transaction - Date: ${date} ${time}, Amount: ${currency} ${amount}, Card: ****${cardNumber}`,
-    );
+    // Split location and description
+    // Format is typically: "DESCRIPTION       LOCATION     COUNTRY_CODE"
+    // Multiple spaces separate the fields
+    const parts = locationAndDescription.trim().split(/\s{2,}/); // Split by 2 or more spaces
 
-    return {
-      date: `${date} ${time}`, // Full date with time
-      paymentMethodNumber: `****${cardNumber}`, // Keep the masked format
-      currency: currency.replace('$', ''), // Remove $ symbol, keep currency code
+    let description = '';
+    let location = '';
+
+    if (parts.length >= 2) {
+      // First part is description, rest is location
+      description = parts[0].trim();
+      location = parts.slice(1).join(' ').trim();
+    } else {
+      // If we can't split properly, use the whole thing as description
+      description = locationAndDescription.trim();
+    }
+
+    // Extract currency code from captured group (e.g., "US$" -> "US", "$" -> "CLP")
+    let currency = 'CLP';
+    if (currencyWithSymbol) {
+      const currencyRegex = /([A-Z]{2,3})/;
+      const currencyMatch = currencyRegex.exec(currencyWithSymbol);
+      if (currencyMatch) {
+        currency = currencyMatch[1];
+      }
+    }
+
+    const [day, month, year] = date.split('/').map(Number);
+    const [hours, minutes] = time.split(':').map(Number);
+
+    // Create Date object in local timezone
+    // Note: Month is 0-indexed in JavaScript Date
+    const transactionDate = new Date(year, month - 1, day, hours, minutes);
+
+    const emailTransaction: EmailTransaction = {
+      date: transactionDate,
+      paymentMethodNumber: cardNumber,
+      currency: currency,
       amount: amount,
+      location: location,
+      description: description,
     };
 
-    //   /**
-    //    * Get emails within date range
-    //    * @param since - Start date
-    //    * @param before - End date
-    //    * @param folder - Email folder to search in
-    //    * @returns Array of email messages within date range
-    //    */
-    //   async getEmailsByDateRange(since: Date, before: Date, folder: string = 'INBOX'): Promise<EmailMessage[]> {
-    //     const sinceStr = since.toISOString().split('T')[0];
-    //     const beforeStr = before.toISOString().split('T')[0];
-    //     return this.searchEmails(['SINCE', sinceStr, 'BEFORE', beforeStr], folder);
-    //   }
+    this.logger.log(
+      `Extracted transaction - Date: ${emailTransaction.date}, Amount: ${emailTransaction.currency} ${emailTransaction.amount}, Card: ${emailTransaction.paymentMethodNumber}, Description: ${emailTransaction.description}, Location: ${emailTransaction.location}`,
+    );
+
+    return emailTransaction;
+  }
+
+  extractEmailExtraCreditCardPayment(html: string): EmailTransaction | null {
+    const $ = cheerio.load(html);
+
+    // Extract account number (N° de cuenta)
+    const accountNumberCell = $('td:contains("N° de cuenta")').next('td');
+    const accountNumber = accountNumberCell.text().trim();
+
+    // Extract card number (N° de tarjeta)
+    const cardNumberCell = $('td:contains("N° de tarjeta")').next('td');
+    const cardNumber = cardNumberCell.text().trim();
+    // Extract last 4 digits from masked format (************0377)
+    const cardLast4 = cardNumber.match(/\d{4}$/)?.[0] || '';
+
+    // Extract amount (Monto)
+    const amountCell = $('td:contains("Monto")').next('td');
+    const amountText = amountCell.text().trim();
+    // Parse amount, removing $ and converting . to empty and , to .
+    const amount = amountText.replace(/\$/g, '').replace(/\./g, '').replace(/,/g, '.');
+
+    // Extract date and time (Fecha y Hora)
+    const dateTimeText = $('p:contains("Fecha y Hora:")').next('p').text().trim();
+    // Format: "domingo 28 de diciembre de 2025 20:55"
+    const dateTimeMatch = dateTimeText.match(/(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})\s+(\d{2}):(\d{2})/i);
+
+    let transactionDate = new Date();
+    if (dateTimeMatch) {
+      const [, day, monthName, year, hours, minutes] = dateTimeMatch;
+      const monthMap: { [key: string]: number } = {
+        enero: 0,
+        febrero: 1,
+        marzo: 2,
+        abril: 3,
+        mayo: 4,
+        junio: 5,
+        julio: 6,
+        agosto: 7,
+        septiembre: 8,
+        octubre: 9,
+        noviembre: 10,
+        diciembre: 11,
+      };
+      const month = monthMap[monthName.toLowerCase()];
+      transactionDate = new Date(parseInt(year), month, parseInt(day), parseInt(hours), parseInt(minutes));
+    }
+
+    // Extract transaction ID
+    const transactionIdText = $('p:contains("Transacción:")').next('p').text().trim();
+
+    // Extract origin account type
+    const accountTypeCell = $('td:contains("Tipo de cuenta")').next('td');
+    const accountType = accountTypeCell.text().trim();
+
+    if (!cardLast4 || !amount) {
+      this.logger.warn('No transaction data found in email');
+      return null;
+    }
+
+    const emailCreditCardPayment: EmailTransaction = {
+      date: transactionDate,
+      paymentMethodNumber: cardLast4,
+      currency: 'CLP', // Chilean Pesos
+      amount: `-${amount}`,
+      location: 'Pago Tarjeta de Crédito', // Payment type
+      description: `Pago desde ${accountType} ${accountNumber}`, // Description with account info
+      transactionId: transactionIdText, // Optional: add this field to your interface
+    };
+
+    this.logger.log(
+      `Extracted transaction - Date: ${emailCreditCardPayment.date}, Amount: ${emailCreditCardPayment.currency} ${emailCreditCardPayment.amount}, Card: ${emailCreditCardPayment.paymentMethodNumber}, Description: ${emailCreditCardPayment.description}, Location: ${emailCreditCardPayment.location}`,
+    );
+
+    return emailCreditCardPayment;
+  }
+
+  extractEmailCreditCardPayments(html: string): EmailTransaction | null {
+    const $ = cheerio.load(html);
+
+    const introParagraph = $('p').first().text();
+
+    // Extract card number from intro text
+    const cardMatch = introParagraph.match(/terminaci[oó]n\s+\*{4}(\d{4})/i);
+    const cardNumber = cardMatch?.[1] || '';
+
+    // Extract account number from intro text
+    const accountMatch = introParagraph.match(/Cuenta\s+Corriente\s+([\d-]+)/i);
+    const accountNumber = accountMatch?.[1] || '';
+
+    // Method 2: Extract from the structured table
+    // Find the cell containing "Monto Pagado" and get its sibling value
+    const amountCell = $('td:contains("Monto Pagado")').next('td');
+    const amountText = amountCell.text().trim();
+    const amount = amountText.replace(/\$/g, '').replace(/\./g, '').replace(/,/g, '.');
+
+    // Extract date (Fecha)
+    const dateCell = $('td:contains("Fecha")').next('td');
+    const dateText = dateCell.text().trim(); // Format: 30/12/2025
+
+    // Extract time (Hora)
+    const timeCell = $('td:contains("Hora")').next('td');
+    const timeText = timeCell.text().trim(); // Format: 13:33
+
+    // Parse date and time
+    let transactionDate = new Date();
+    if (dateText && timeText) {
+      const [day, month, year] = dateText.split('/').map(Number);
+      const [hours, minutes] = timeText.split(':').map(Number);
+      transactionDate = new Date(year, month - 1, day, hours, minutes);
+    }
+
+    if (!cardNumber || !amount) {
+      this.logger.warn('No transaction data found in email (alternative format)');
+      return null;
+    }
+
+    const emailTransaction: EmailTransaction = {
+      date: transactionDate,
+      paymentMethodNumber: cardNumber,
+      currency: 'CLP', // Chilean Pesos
+      amount: `-${amount}`,
+      location: 'Pago Tarjeta de Crédito', // Payment type
+      description: `Pago desde Cuenta Corriente ${accountNumber}`,
+    };
+
+    this.logger.log(
+      `Extracted transaction (alt format) - Date: ${emailTransaction.date}, Amount: ${emailTransaction.currency} ${emailTransaction.amount}, Card: ${emailTransaction.paymentMethodNumber}, Account: ${accountNumber}, Description: ${emailTransaction.description}`,
+    );
+
+    return emailTransaction;
+  }
+
+  async bancoDeChileEmailExpenses(latestStatementDate: string): Promise<EmailTransaction[]> {
+    const emailExpenses: EmailTransaction[] = [];
+    const emails = await this.searchEmails([
+      ['SINCE', latestStatementDate],
+      ['FROM', 'enviodigital@bancochile.cl'],
+      ['SUBJECT', 'Compra'],
+    ]);
+    for (const email of emails) {
+      const parsedEmailTransaction = this.extractEmailTransaction(email.html || '');
+      if (parsedEmailTransaction) {
+        emailExpenses.push(parsedEmailTransaction);
+      }
+    }
+    return emailExpenses;
+  }
+
+  async bancoDeChileEmailCreditCardPayment(latestStatementDate: string): Promise<EmailTransaction[]> {
+    const emailExpenseCreditCardPayments: EmailTransaction[] = [];
+    const emailCreditCardPayments = await this.searchEmails([
+      ['SINCE', latestStatementDate],
+      ['FROM', 'serviciodetransferencias@bancochile.cl'],
+      ['SUBJECT', 'Comprobante Pago Tarjeta'],
+    ]);
+    for (const email of emailCreditCardPayments) {
+      const parsedEmailCreditCardPayment = this.extractEmailCreditCardPayments(email.html || '');
+      if (parsedEmailCreditCardPayment) {
+        emailExpenseCreditCardPayments.push(parsedEmailCreditCardPayment);
+      }
+    }
+    const emailExtraCreditCardPayments = await this.searchEmails([
+      ['SINCE', latestStatementDate],
+      ['FROM', 'serviciodetransferencias@bancochile.cl'],
+      ['SUBJECT', 'Pago de Tarjeta de Crédito Nacional'],
+    ]);
+    for (const email of emailExtraCreditCardPayments) {
+      const parsedEmailCreditCardPayment = this.extractEmailExtraCreditCardPayment(email.html || '');
+      if (parsedEmailCreditCardPayment) {
+        emailExpenseCreditCardPayments.push(parsedEmailCreditCardPayment);
+      }
+    }
+    return emailExpenseCreditCardPayments;
   }
 }

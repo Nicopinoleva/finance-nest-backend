@@ -1,3 +1,5 @@
+import Decimal from 'decimal.js';
+
 export interface TransactionsCoordinates {
   text: string;
   x: number;
@@ -5,6 +7,32 @@ export interface TransactionsCoordinates {
   width: number;
   height: number;
   page: number;
+}
+
+export interface TransactionCoordinatesWithPadding {
+  coordinates: TransactionsCoordinates[];
+  text: string;
+  startYPadding?: number;
+  endYPadding?: number;
+  startXPadding?: number;
+  endXPadding?: number;
+  stopOnFirstMatch?: boolean;
+}
+
+export interface CreditCardStatementCoordinates {
+  billingPeriodStartEnd?: TransactionCoordinatesWithPadding;
+  billingPeriodStart?: TransactionCoordinatesWithPadding;
+  billingPeriodEnd?: TransactionCoordinatesWithPadding;
+  transactionsTable: TransactionCoordinatesWithPadding;
+  transactionsEnd: TransactionCoordinatesWithPadding;
+  mainCreditCardText: TransactionCoordinatesWithPadding;
+  dueDateCoordinates: TransactionCoordinatesWithPadding;
+  dueAmountCoordinates: TransactionCoordinatesWithPadding;
+  minimumPaymentCoordinates: TransactionCoordinatesWithPadding;
+  previousStatementBilledAmountCoordinates?: TransactionCoordinatesWithPadding;
+  previousStatementPaidAmountCoordinates?: TransactionCoordinatesWithPadding;
+  previousStatementDebtCoordinates?: TransactionCoordinatesWithPadding;
+  unbilledStatementsTableStartCoordinates: TransactionCoordinatesWithPadding;
 }
 
 export interface CutRegion {
@@ -20,18 +48,20 @@ export interface Transaction {
   date: string;
   referenceCode: string;
   description: string;
-  operationAmount: number;
-  totalAmount: number;
+  operationAmount: Decimal;
+  totalAmount: Decimal;
   currentInstallment: number;
   totalInstallments: number;
-  monthlyAmount: number;
+  monthlyAmount: Decimal;
   reference: string;
+  creditCard: string;
 }
 
 export interface TransactionCategory {
-  parsedTotal: number;
-  calculatedTotal: number;
+  parsedTotal: Decimal;
+  calculatedTotal: Decimal;
   transactions: Transaction[];
+  reference?: string;
 }
 
 export interface ParsedStatement {
@@ -56,4 +86,23 @@ export interface ParsedStatement {
 export interface RegionBounds {
   bottom: number;
   top: number;
+}
+
+export interface CreditCardsDebt {
+  creditCards: {
+    creditCard: string;
+    billedStatements: {
+      total: Decimal;
+      billingPeriodStart: string;
+      billingPeriodEnd: string;
+      transactions: TransactionCategory[];
+    } | null;
+    unbilledStatements: {
+      total: Decimal;
+      unbilledPeriodStart: string | null;
+      transactions: TransactionCategory[];
+    } | null;
+  }[];
+  totalDebt: Decimal;
+  month: string;
 }

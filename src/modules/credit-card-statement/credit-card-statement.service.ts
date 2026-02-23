@@ -1,21 +1,20 @@
-import { HttpException, HttpStatus, Injectable, Scope } from '@nestjs/common';
-import PdfParse from 'pdf-parse-new';
-import { promises as fs } from 'fs';
-import path from 'path';
+import { forwardRef, HttpException, HttpStatus, Inject, Injectable } from '@nestjs/common';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
-import type { PDFPageProxy } from 'pdfjs-dist';
-import { TextItem } from 'pdfjs-dist/types/src/display/api';
-import { CreditCardStatementBanks } from 'src/utils';
 import {
+  CreditCardsDebt,
+  CreditCardStatementCoordinates,
   CutRegion,
   ParsedStatement,
   RegionBounds,
   Transaction,
   TransactionCategory,
+  TransactionCoordinatesWithPadding,
   TransactionsCoordinates,
 } from './credit-card-statement.interface';
 import { ExpensesService } from '@modules/expenses/expenses/expenses.service';
-import { CreditCardStatementReferencesEnum } from 'src/utils/constants/credit-card-statement-references';
+import { CreditCardStatementReferencesEnum } from 'src/utils/constants/credit-card-statement-references.enum';
 import { parse } from 'date-fns';
 import { CreditCardStatement } from '@entities/credit-card-statement/credit-card-statement.entity';
 import { Repository } from 'typeorm';
@@ -23,25 +22,68 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { PaymentMethodsService } from '@modules/payment-methods/payment-methods/payment-methods.service';
 import { Transactional, TransactionHost } from '@nestjs-cls/transactional';
 import { TransactionalAdapterTypeOrm } from '@nestjs-cls/transactional-adapter-typeorm';
+import {
+  CreditCardStatementBanks,
+  extractTextFromCoordinates,
+  findTextCoordinates,
+  matchMultipleTextWithPattern,
+  matchTextWithPattern,
+  normalizeDateString,
+  parseAmount,
+  PaymentMethodTypesEnum,
+} from '@utils';
+import { BankParseConfiguration, CreditCardStatementReference, Expense, PaymentMethod } from '@entities';
+import Decimal from 'decimal.js';
 
-@Injectable({ scope: Scope.REQUEST })
+interface TotalMatch {
+  amount: string;
+  parsedAmount: number;
+  index: number;
+  category?: string;
+}
+
+@Injectable()
 export class CreditCardStatementService {
   private creditCardStatementPDF: PDFDocument;
-  private billingPeriodStartEndCoordinates: TransactionsCoordinates[] = [];
-  private transactionsTableCoordinates: TransactionsCoordinates[] = [];
-  private transactionsEndCoordinates: TransactionsCoordinates[] = [];
-  private mainCreditCardTextCoordinates: TransactionsCoordinates[] = [];
-  private dueDateCoordinates: TransactionsCoordinates[] = [];
-  private dueAmountCoordinates: TransactionsCoordinates[] = [];
-  private minimumPaymentCoordinates: TransactionsCoordinates[] = [];
-  private previousStatementDebtCoordinates: TransactionsCoordinates[] = [];
-  private unbilledStatementsTableStartCoordinates: TransactionsCoordinates[] = [];
+  private bankToParse: CreditCardStatementBanks;
+  private readonly creditCardStatementCoordinates: CreditCardStatementCoordinates = {
+    transactionsTable: {
+      coordinates: [],
+      text: '',
+    },
+    transactionsEnd: {
+      coordinates: [],
+      text: '',
+    },
+    mainCreditCardText: {
+      coordinates: [],
+      text: '',
+    },
+    dueDateCoordinates: {
+      coordinates: [],
+      text: '',
+    },
+    dueAmountCoordinates: {
+      coordinates: [],
+      text: '',
+    },
+    minimumPaymentCoordinates: {
+      coordinates: [],
+      text: '',
+    },
+    unbilledStatementsTableStartCoordinates: {
+      coordinates: [],
+      text: '',
+    },
+  };
   constructor(
     @InjectRepository(CreditCardStatement)
     private readonly creditCardStatementRepository: Repository<CreditCardStatement>,
+    @Inject(forwardRef(() => PaymentMethodsService))
     private readonly paymentMethodService: PaymentMethodsService,
-    private readonly expensesService: ExpensesService,
     private readonly txHost: TransactionHost<TransactionalAdapterTypeOrm>,
+    @Inject(forwardRef(() => ExpensesService))
+    private readonly expensesService: ExpensesService,
   ) {}
 
   async parseCreditCardStatement(
@@ -50,23 +92,15 @@ export class CreditCardStatementService {
     renderDebugPdf?: boolean,
     filePath?: string,
   ): Promise<ParsedStatement> {
-    if (bankToParse === CreditCardStatementBanks.BancoDeChile) {
-      this.mainCreditCardTextCoordinates = await this.findTextCoordinates(file, 'N° DE TARJETA DE CRÉDITO');
-      this.billingPeriodStartEndCoordinates = await this.findTextCoordinates(file, 'PERIODO FACTURADO');
-      this.dueDateCoordinates = await this.findTextCoordinates(file, 'PAGAR HASTA');
-      this.dueAmountCoordinates = await this.findTextCoordinates(file, 'MONTO TOTAL FACTURADO A PAGAR');
-      this.minimumPaymentCoordinates = await this.findTextCoordinates(file, 'MONTO MINIMO A PAGAR');
-      this.previousStatementDebtCoordinates = await this.findTextCoordinates(
-        file,
-        'SALDO ADEUDADO FINAL PERIODO ANTERIOR',
-      );
-      this.transactionsTableCoordinates = await this.findTextCoordinates(file, '2. PERIODO ACTUAL', false);
-      this.transactionsEndCoordinates = await this.findTextCoordinates(file, 'III. INFORMACIÓN DE PAGO');
-      this.unbilledStatementsTableStartCoordinates = await this.findTextCoordinates(
-        file,
-        '4.INFORMACION COMPRAS EN CUOTAS',
-      );
+    try {
+      this.creditCardStatementPDF = await PDFDocument.load(file.buffer);
+    } catch (error) {
+      if (error.message.includes('encrypted') || error.message.includes('password')) {
+        throw new HttpException('Pdf con contraseña no es soportado', HttpStatus.UNPROCESSABLE_ENTITY);
+      }
     }
+    this.bankToParse = bankToParse;
+    await this.textCoordinateFindConfig(file);
 
     // Optionally render debug PDF
     if (renderDebugPdf) {
@@ -76,77 +110,291 @@ export class CreditCardStatementService {
     return await this.extractAndParseTransactions(file);
   }
 
-  async extractAndParseTransactions(file: Express.Multer.File): Promise<ParsedStatement> {
-    if (!this.creditCardStatementPDF) {
-      this.creditCardStatementPDF = await PDFDocument.load(file.buffer);
+  async textCoordinateFindConfig(file: Express.Multer.File) {
+    const config = await this.txHost.tx.findOneOrFail(BankParseConfiguration, {
+      where: {
+        bank: { name: this.bankToParse },
+        paymentMethodType: { name: PaymentMethodTypesEnum.CreditCard },
+      },
+    });
+
+    if (!config.configuration) {
+      throw new HttpException(
+        `No se encontró configuración de parseo para ${this.bankToParse}`,
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
     }
+
+    const configKeys = Object.keys(config.configuration) as Array<keyof CreditCardStatementCoordinates>;
+
+    for (const key of configKeys) {
+      const coordinateConfig = config.configuration[key];
+
+      if (coordinateConfig && typeof coordinateConfig === 'object') {
+        const text = coordinateConfig.text ?? '';
+        const stopOnFirstMatch = coordinateConfig.stopOnFirstMatch ?? true;
+
+        this.creditCardStatementCoordinates[key] = {
+          ...coordinateConfig,
+          text,
+          coordinates: await findTextCoordinates(file, text, this.creditCardStatementPDF, stopOnFirstMatch),
+        } as TransactionCoordinatesWithPadding;
+      }
+    }
+  }
+
+  async extractAndParseTransactions(file: Express.Multer.File): Promise<ParsedStatement> {
     const pdfDoc = this.creditCardStatementPDF;
     const pages = pdfDoc.getPages();
 
     // TODO: Maybe its possible to extract all text in one sweep instead of multiple calls
-    const mainCreditCardText = await this.extractTextFromCoordinates(
+    const mainCreditCardText = await extractTextFromCoordinates(
       file.buffer,
-      this.mainCreditCardTextCoordinates[0].page,
-      Math.trunc(this.mainCreditCardTextCoordinates[0].y),
-      Math.trunc(this.mainCreditCardTextCoordinates[0].y + this.mainCreditCardTextCoordinates[0].height),
+      this.creditCardStatementCoordinates.mainCreditCardText.coordinates[0].page,
+      this.creditCardStatementPDF,
+      Math.trunc(this.creditCardStatementCoordinates.mainCreditCardText.coordinates[0].y),
+      Math.trunc(
+        this.creditCardStatementCoordinates.mainCreditCardText.coordinates[0].y +
+          this.creditCardStatementCoordinates.mainCreditCardText.coordinates[0].height -
+          3,
+      ),
     );
 
-    const billingPeriodStartEndText = await this.extractTextFromCoordinates(
+    let billingPeriodStartEndText = [];
+
+    if (this.creditCardStatementCoordinates.billingPeriodStartEnd) {
+      const billingPeriod = await extractTextFromCoordinates(
+        file.buffer,
+        this.creditCardStatementCoordinates.billingPeriodStartEnd.coordinates[0].page,
+        this.creditCardStatementPDF,
+        Math.trunc(this.creditCardStatementCoordinates.billingPeriodStartEnd.coordinates[0].y),
+        Math.trunc(
+          this.creditCardStatementCoordinates.billingPeriodStartEnd.coordinates[0].y +
+            this.creditCardStatementCoordinates.billingPeriodStartEnd.coordinates[0].height,
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.billingPeriodStartEnd.coordinates[0].x +
+            this.creditCardStatementCoordinates.billingPeriodStartEnd.coordinates[0].width +
+            (this.creditCardStatementCoordinates.billingPeriodStartEnd.startXPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.billingPeriodStartEnd.coordinates[0].x +
+            this.creditCardStatementCoordinates.billingPeriodStartEnd.coordinates[0].width +
+            (this.creditCardStatementCoordinates.billingPeriodStartEnd.endXPadding ?? 0),
+        ),
+      );
+      billingPeriodStartEndText.push(billingPeriod);
+    } else if (
+      this.creditCardStatementCoordinates.billingPeriodStart &&
+      this.creditCardStatementCoordinates.billingPeriodEnd
+    ) {
+      const billingPeriodStartText = await extractTextFromCoordinates(
+        file.buffer,
+        this.creditCardStatementCoordinates.billingPeriodStart.coordinates[0].page,
+        this.creditCardStatementPDF,
+        Math.trunc(
+          this.creditCardStatementCoordinates.billingPeriodStart.coordinates[0].y +
+            (this.creditCardStatementCoordinates.billingPeriodStart.startYPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.billingPeriodStart.coordinates[0].y +
+            this.creditCardStatementCoordinates.billingPeriodStart.coordinates[0].height +
+            (this.creditCardStatementCoordinates.billingPeriodStart.endYPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.billingPeriodStart.coordinates[0].x +
+            this.creditCardStatementCoordinates.billingPeriodStart.coordinates[0].width +
+            (this.creditCardStatementCoordinates.billingPeriodStart.startXPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.billingPeriodStart.coordinates[0].x +
+            this.creditCardStatementCoordinates.billingPeriodStart.coordinates[0].width +
+            (this.creditCardStatementCoordinates.billingPeriodStart.endXPadding ?? 0),
+        ),
+      );
+      const billingPeriodEndText = await extractTextFromCoordinates(
+        file.buffer,
+        this.creditCardStatementCoordinates.billingPeriodEnd.coordinates[0].page,
+        this.creditCardStatementPDF,
+        Math.trunc(
+          this.creditCardStatementCoordinates.billingPeriodEnd.coordinates[0].y +
+            (this.creditCardStatementCoordinates.billingPeriodEnd.startYPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.billingPeriodEnd.coordinates[0].y +
+            this.creditCardStatementCoordinates.billingPeriodEnd.coordinates[0].height +
+            (this.creditCardStatementCoordinates.billingPeriodEnd.endYPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.billingPeriodEnd.coordinates[0].x +
+            this.creditCardStatementCoordinates.billingPeriodEnd.coordinates[0].width +
+            (this.creditCardStatementCoordinates.billingPeriodEnd.startXPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.billingPeriodEnd.coordinates[0].x +
+            this.creditCardStatementCoordinates.billingPeriodEnd.coordinates[0].width +
+            (this.creditCardStatementCoordinates.billingPeriodEnd.endXPadding ?? 0),
+        ),
+      );
+      billingPeriodStartEndText.push(billingPeriodStartText, billingPeriodEndText);
+    }
+
+    const dueDateTexts: string[] = [];
+
+    for (const coord of this.creditCardStatementCoordinates.dueDateCoordinates.coordinates) {
+      dueDateTexts.push(
+        await extractTextFromCoordinates(
+          file.buffer,
+          coord.page,
+          this.creditCardStatementPDF,
+          Math.trunc(coord.y + (this.creditCardStatementCoordinates.dueDateCoordinates.startYPadding ?? 0)),
+          Math.trunc(
+            coord.y + coord.height + (this.creditCardStatementCoordinates.dueDateCoordinates.endYPadding ?? 0),
+          ),
+          Math.trunc(coord.x + (this.creditCardStatementCoordinates.dueDateCoordinates.startXPadding ?? 0)),
+          Math.trunc(coord.x + coord.width + (this.creditCardStatementCoordinates.dueDateCoordinates.endXPadding ?? 0)),
+        ),
+      );
+    }
+
+    const dueAmountText = await extractTextFromCoordinates(
       file.buffer,
-      this.billingPeriodStartEndCoordinates[0].page,
-      Math.trunc(this.billingPeriodStartEndCoordinates[0].y),
-      Math.trunc(this.billingPeriodStartEndCoordinates[0].y + this.billingPeriodStartEndCoordinates[0].height),
-      Math.trunc(this.billingPeriodStartEndCoordinates[0].x + this.billingPeriodStartEndCoordinates[0].width + 15),
-      Math.trunc(this.billingPeriodStartEndCoordinates[0].x + this.billingPeriodStartEndCoordinates[0].width + 90),
+      this.creditCardStatementCoordinates.dueAmountCoordinates.coordinates[0].page,
+      this.creditCardStatementPDF,
+      Math.trunc(this.creditCardStatementCoordinates.dueAmountCoordinates.coordinates[0].y),
+      Math.trunc(
+        this.creditCardStatementCoordinates.dueAmountCoordinates.coordinates[0].y +
+          this.creditCardStatementCoordinates.dueAmountCoordinates.coordinates[0].height +
+          (this.creditCardStatementCoordinates.dueAmountCoordinates.endYPadding ?? 0),
+      ),
+      Math.trunc(
+        this.creditCardStatementCoordinates.dueAmountCoordinates.coordinates[0].x +
+          (this.creditCardStatementCoordinates.dueAmountCoordinates.startXPadding ?? 0),
+      ),
+      Math.trunc(
+        this.creditCardStatementCoordinates.dueAmountCoordinates.coordinates[0].x +
+          this.creditCardStatementCoordinates.dueAmountCoordinates.coordinates[0].width +
+          (this.creditCardStatementCoordinates.dueAmountCoordinates.endXPadding ?? 0),
+      ),
     );
 
-    const dueDateText = await this.extractTextFromCoordinates(
+    const minimumPaymentCoordinatesText = await extractTextFromCoordinates(
       file.buffer,
-      this.dueDateCoordinates[0].page,
-      Math.trunc(this.dueDateCoordinates[0].y + 10),
-      Math.trunc(this.dueDateCoordinates[0].y + this.dueDateCoordinates[0].height + 10),
+      this.creditCardStatementCoordinates.minimumPaymentCoordinates.coordinates[0].page,
+      this.creditCardStatementPDF,
+      Math.trunc(this.creditCardStatementCoordinates.minimumPaymentCoordinates.coordinates[0].y),
+      Math.trunc(
+        this.creditCardStatementCoordinates.minimumPaymentCoordinates.coordinates[0].y +
+          this.creditCardStatementCoordinates.minimumPaymentCoordinates.coordinates[0].height +
+          (this.creditCardStatementCoordinates.minimumPaymentCoordinates.endYPadding ?? 0),
+      ),
     );
 
-    const dueAmountText = await this.extractTextFromCoordinates(
-      file.buffer,
-      this.dueAmountCoordinates[0].page,
-      Math.trunc(this.dueAmountCoordinates[0].y),
-      Math.trunc(this.dueAmountCoordinates[0].y + this.dueAmountCoordinates[0].height + 10),
-    );
+    let previousStatementDebt: number | string = '';
 
-    const minimumPaymentCoordinatesText = await this.extractTextFromCoordinates(
-      file.buffer,
-      this.minimumPaymentCoordinates[0].page,
-      Math.trunc(this.minimumPaymentCoordinates[0].y),
-      Math.trunc(this.minimumPaymentCoordinates[0].y + this.minimumPaymentCoordinates[0].height + 10),
-    );
+    if (this.creditCardStatementCoordinates.previousStatementDebtCoordinates) {
+      const previousStatementDebtCoordinatesText = await extractTextFromCoordinates(
+        file.buffer,
+        this.creditCardStatementCoordinates.previousStatementDebtCoordinates.coordinates[0].page,
+        this.creditCardStatementPDF,
+        Math.trunc(this.creditCardStatementCoordinates.previousStatementDebtCoordinates.coordinates[0].y),
+        Math.trunc(
+          this.creditCardStatementCoordinates.previousStatementDebtCoordinates.coordinates[0].y +
+            this.creditCardStatementCoordinates.previousStatementDebtCoordinates.coordinates[0].height +
+            (this.creditCardStatementCoordinates.previousStatementDebtCoordinates.endYPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.previousStatementDebtCoordinates.coordinates[0].x +
+            this.creditCardStatementCoordinates.previousStatementDebtCoordinates.coordinates[0].width +
+            (this.creditCardStatementCoordinates.previousStatementDebtCoordinates.startXPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.previousStatementDebtCoordinates.coordinates[0].x +
+            this.creditCardStatementCoordinates.previousStatementDebtCoordinates.coordinates[0].width +
+            (this.creditCardStatementCoordinates.previousStatementDebtCoordinates.endXPadding ?? 0),
+        ),
+      );
+      previousStatementDebt = previousStatementDebtCoordinatesText;
+    } else if (
+      this.creditCardStatementCoordinates.previousStatementBilledAmountCoordinates &&
+      this.creditCardStatementCoordinates.previousStatementPaidAmountCoordinates
+    ) {
+      const previousStatementBilledAmountText = await extractTextFromCoordinates(
+        file.buffer,
+        this.creditCardStatementCoordinates.previousStatementBilledAmountCoordinates.coordinates[0].page,
+        this.creditCardStatementPDF,
+        Math.trunc(
+          this.creditCardStatementCoordinates.previousStatementBilledAmountCoordinates.coordinates[0].y +
+            (this.creditCardStatementCoordinates.previousStatementBilledAmountCoordinates.startYPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.previousStatementBilledAmountCoordinates.coordinates[0].y +
+            this.creditCardStatementCoordinates.previousStatementBilledAmountCoordinates.coordinates[0].height +
+            (this.creditCardStatementCoordinates.previousStatementBilledAmountCoordinates.endYPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.previousStatementBilledAmountCoordinates.coordinates[0].x +
+            (this.creditCardStatementCoordinates.previousStatementBilledAmountCoordinates.startXPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.previousStatementBilledAmountCoordinates.coordinates[0].x +
+            this.creditCardStatementCoordinates.previousStatementBilledAmountCoordinates.coordinates[0].width +
+            (this.creditCardStatementCoordinates.previousStatementBilledAmountCoordinates.endXPadding ?? 0),
+        ),
+      );
+      const previousStatementBilledAmount = parseAmount(
+        new RegExp(/\$\s*(-?[\d.,]+)/).exec(previousStatementBilledAmountText)?.[0] ?? '',
+      );
 
-    const previousStatementDebtCoordinatesText = await this.extractTextFromCoordinates(
-      file.buffer,
-      this.previousStatementDebtCoordinates[0].page,
-      Math.trunc(this.previousStatementDebtCoordinates[0].y),
-      Math.trunc(this.previousStatementDebtCoordinates[0].y + this.previousStatementDebtCoordinates[0].height + 10),
-      Math.trunc(this.previousStatementDebtCoordinates[0].x + this.previousStatementDebtCoordinates[0].width + 100),
-      Math.trunc(this.previousStatementDebtCoordinates[0].x + this.previousStatementDebtCoordinates[0].width + 160),
-    );
+      const previousStatementPaidAmountText = await extractTextFromCoordinates(
+        file.buffer,
+        this.creditCardStatementCoordinates.previousStatementPaidAmountCoordinates.coordinates[0].page,
+        this.creditCardStatementPDF,
+        Math.trunc(
+          this.creditCardStatementCoordinates.previousStatementPaidAmountCoordinates.coordinates[0].y +
+            (this.creditCardStatementCoordinates.previousStatementPaidAmountCoordinates.startYPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.previousStatementPaidAmountCoordinates.coordinates[0].y +
+            this.creditCardStatementCoordinates.previousStatementPaidAmountCoordinates.coordinates[0].height +
+            (this.creditCardStatementCoordinates.previousStatementPaidAmountCoordinates.endYPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.previousStatementPaidAmountCoordinates.coordinates[0].x +
+            (this.creditCardStatementCoordinates.previousStatementPaidAmountCoordinates.startXPadding ?? 0),
+        ),
+        Math.trunc(
+          this.creditCardStatementCoordinates.previousStatementPaidAmountCoordinates.coordinates[0].x +
+            this.creditCardStatementCoordinates.previousStatementPaidAmountCoordinates.coordinates[0].width +
+            (this.creditCardStatementCoordinates.previousStatementPaidAmountCoordinates.endXPadding ?? 0),
+        ),
+      );
 
+      const previousStatementPaidAmount = parseAmount(
+        new RegExp(/\$\s*(-?[\d.,]+)/).exec(previousStatementPaidAmountText)?.[0] ?? '',
+      );
+
+      // Its added because paid amount is negative
+      previousStatementDebt = previousStatementBilledAmount + previousStatementPaidAmount;
+    }
     const allTransactionsText: string[] = [];
 
     // Extract text from all transaction regions
-    for (const item of this.transactionsTableCoordinates) {
+    for (const item of this.creditCardStatementCoordinates.transactionsTable.coordinates) {
       const targetPage = pages[item.page];
       const { height: pageHeight } = targetPage.getSize();
 
       const bounds = this.calculateRegionBounds(
         item.page,
-        this.transactionsEndCoordinates[0].page,
+        this.creditCardStatementCoordinates.transactionsEnd.coordinates[0].page,
         pageHeight,
-        this.transactionsEndCoordinates[0],
+        this.creditCardStatementCoordinates.transactionsEnd.coordinates[0],
       );
 
-      const regionText = await this.extractTextFromCoordinates(
+      const regionText = await extractTextFromCoordinates(
         file.buffer,
         item.page,
+        this.creditCardStatementPDF,
         item.y + bounds.top,
         pageHeight - bounds.bottom,
       );
@@ -154,169 +402,41 @@ export class CreditCardStatementService {
       allTransactionsText.push(regionText);
     }
 
-    return this.parseTransactionText(
-      mainCreditCardText,
-      billingPeriodStartEndText,
-      dueDateText,
-      dueAmountText,
-      minimumPaymentCoordinatesText,
-      previousStatementDebtCoordinatesText,
-      allTransactionsText.join('\n'),
-    );
-  }
-
-  /**
-   * Calculate the top and bottom bounds for a region based on page position
-   */
-  private calculateRegionBounds(
-    currentPage: number,
-    lastPage: number,
-    pageHeight: number,
-    endCoordinates: TransactionsCoordinates,
-  ): RegionBounds {
-    let bottom = 0;
-    let top = 0;
-
-    if (currentPage === 0) {
-      // For Banco de Chile, footer text appears ~200 points from bottom on first page
-      bottom = 200;
-    } else if (currentPage === lastPage) {
-      // For Banco de Chile, on the last transaction page, stop above the "III. INFORMACIÓN DE PAGO" section with 50 padding
-      bottom = pageHeight - (endCoordinates.y + endCoordinates.height) + 50;
+    if (this.bankToParse === CreditCardStatementBanks.BancoDeChile) {
+      return this.parseTransactionTextBancoDeChile(
+        [mainCreditCardText],
+        billingPeriodStartEndText,
+        dueDateTexts,
+        [dueAmountText],
+        [minimumPaymentCoordinatesText],
+        [previousStatementDebt as string],
+        allTransactionsText.join('\n'),
+      );
+    } else if (this.bankToParse === CreditCardStatementBanks.LiderBCI) {
+      return this.parseTransactionTextLiderBci(
+        [mainCreditCardText],
+        billingPeriodStartEndText,
+        dueDateTexts,
+        [dueAmountText],
+        [minimumPaymentCoordinatesText],
+        previousStatementDebt as number,
+        allTransactionsText.join('\n'),
+      );
+    } else {
+      throw new HttpException('Banco no soportado para parseo de estado de cuenta', HttpStatus.UNPROCESSABLE_ENTITY);
     }
-    if (currentPage !== 0) {
-      // For Banco de Chile, on intermediate pages, add 50 padding at top to remove repeated headers
-      top = 45;
-    }
-
-    return { bottom, top };
-  }
-
-  async findTextCoordinates(
-    file: Express.Multer.File,
-    searchText: string,
-    stopAtFirstMatch = true,
-  ): Promise<TransactionsCoordinates[]> {
-    const pdfBuffer = file.buffer;
-    const textItems: TransactionsCoordinates[] = [];
-
-    if (!this.creditCardStatementPDF) {
-      this.creditCardStatementPDF = await PDFDocument.load(pdfBuffer);
-    }
-
-    const pages = this.creditCardStatementPDF.getPages();
-    const pageSizes = pages.map((page) => page.getSize());
-
-    const options = {
-      pagerender: async (pageData: PDFPageProxy) => {
-        // Skip processing if we already found a result and should stop
-        if (stopAtFirstMatch && textItems.length > 0) {
-          return '';
-        }
-
-        const pageNumber = pageData._pageIndex;
-        const pageHeight = pageSizes[pageNumber]?.height || 792;
-        const textContent = await pageData.getTextContent();
-
-        for (const item of textContent.items as TextItem[]) {
-          // Skip processing if we already found a result and should stop
-          if (stopAtFirstMatch && textItems.length > 0) {
-            continue;
-          }
-
-          if (item.str.toLowerCase().includes(searchText.toLowerCase())) {
-            textItems.push({
-              text: item.str,
-              x: item.transform[4],
-              y: pageHeight - item.transform[5],
-              width: item.width || 0,
-              height: item.height || item.transform[3] || 12,
-              page: pageNumber,
-            });
-          }
-        }
-
-        return '';
-      },
-    };
-
-    await PdfParse(pdfBuffer, options);
-    return textItems;
-  }
-
-  async extractTextFromCoordinates(
-    pdfBuffer: Buffer,
-    pageNumber: number,
-    startY: number,
-    endY: number,
-    startX?: number,
-    endX?: number,
-  ): Promise<string> {
-    if (!this.creditCardStatementPDF) {
-      this.creditCardStatementPDF = await PDFDocument.load(pdfBuffer);
-    }
-    const pages = this.creditCardStatementPDF.getPages();
-    const pageHeight = pages[pageNumber].getSize().height;
-
-    const options = {
-      pagerender: async (pageData: PDFPageProxy) => {
-        // Only process the specified page
-        if (pageData._pageIndex !== pageNumber) {
-          return '';
-        }
-
-        const textContent = await pageData.getTextContent();
-        const textItems: Array<{ text: string; y: number; x: number }> = [];
-
-        for (const item of textContent.items as TextItem[]) {
-          // Top to bottom conversion
-          const y = Math.trunc(pageHeight - item.transform[5]);
-
-          // Only include text within region
-          if (startX !== undefined && endX !== undefined) {
-            const x = Math.trunc(item.transform[4]);
-            if (x >= startX && x <= endX && y >= startY && y <= endY) {
-              textItems.push({
-                text: item.str,
-                y: y,
-                x: x,
-              });
-            }
-          } else if (y >= startY && y <= endY) {
-            textItems.push({
-              text: item.str,
-              y: y,
-              x: item.transform[4],
-            });
-          }
-        }
-
-        // Sort by y position (top to bottom) then x position (left to right)
-        textItems.sort((a, b) => {
-          const yDiff = a.y - b.y;
-          if (Math.abs(yDiff) < 5) return a.x - b.x; // Same line
-          return yDiff;
-        });
-        // TODO: This could be skipped
-        return textItems.map((item) => item.text).join(' ');
-      },
-    };
-
-    // This parses the pdf only on the specified regions
-    const data = await PdfParse(pdfBuffer, options);
-    return data.text;
   }
 
   // TODO: Atomize to smaller functions
   @Transactional()
-  async parseTransactionText(
-    mainCreditCard: string,
-    billingPeriodStartEnd: string,
-    dueDateText: string,
-    dueAmountText: string,
-    minimumPaymentCoordinatesText: string,
-    previousStatementDebtCoordinatesText: string,
-    text: string,
+  async parseTransactionTextBancoDeChile(
+    mainCreditCard: string[],
+    billingPeriodStartEnd: string[],
+    dueDateText: string[],
+    dueAmountText: string[],
+    minimumPaymentCoordinatesText: string[],
+    previousStatementDebtCoordinatesText: string[],
+    allTransactionsText: string,
   ): Promise<ParsedStatement> {
     const transactionsMap: Map<string, TransactionCategory> = new Map();
     let totalPayments = 0;
@@ -326,80 +446,226 @@ export class CreditCardStatementService {
     let totalCharges = 0;
     let totalUnbilledInstallments = 0;
 
-    const mainCreditCardNumberMatch = new RegExp(/\d{4}(?=\D*$)/).exec(mainCreditCard);
+    let mainCreditCardNumberMatch: RegExpExecArray | null = null;
+    let billingPeriodMatchStartEnd: RegExpMatchArray | null = null;
+    let dueDateMatch: RegExpExecArray | null = null;
+    let dueAmountMatch: RegExpExecArray | null = null;
+    let minimumPaymentMatch: RegExpExecArray | null = null;
+    let previousStatementDebtMatch: RegExpExecArray | null = null;
+
+    for (const text of mainCreditCard) {
+      const match = new RegExp(/\d{4}(?=\D*$)/).exec(text);
+      if (match) {
+        mainCreditCardNumberMatch = match;
+        break;
+      }
+    }
+
     if (!mainCreditCardNumberMatch) {
-      throw new HttpException('Could not extract main credit card number', HttpStatus.UNPROCESSABLE_ENTITY);
+      throw new HttpException(
+        'No se pudo extraer el número de tarjeta de crédito principal',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
     }
 
-    const billingPeriodMatch = billingPeriodStartEnd.match(/\d{2}-\d{2}-\d{4}/g);
-    if (!billingPeriodMatch) {
-      throw new HttpException('Could not extract billing period dates', HttpStatus.UNPROCESSABLE_ENTITY);
+    for (const text of billingPeriodStartEnd) {
+      const match = text.match(/\d{2}[-/]\d{2}[-/]\d{4}/g);
+      if (match) {
+        billingPeriodMatchStartEnd = match;
+        break;
+      }
     }
 
-    const dueDateMatch = new RegExp(/\d{2}\/\d{2}\/\d{4}/).exec(dueDateText);
+    if (!billingPeriodMatchStartEnd) {
+      throw new HttpException('No se pudo extraer el período facturado', HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    for (const text of dueDateText) {
+      const match = new RegExp(/\d{2}\/\d{2}\/\d{4}/).exec(text);
+      if (match) {
+        dueDateMatch = match;
+        break;
+      }
+    }
+
     if (!dueDateMatch) {
-      throw new HttpException('Could not extract due date', HttpStatus.UNPROCESSABLE_ENTITY);
+      throw new HttpException('No se pudo extraer la fecha de vencimiento', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
-    const dueAmountMatch = new RegExp(/\$\s*(-?[\d.,]+)/).exec(dueAmountText);
+    for (const text of dueAmountText) {
+      const match = new RegExp(/\$\s*(-?[\d.,]+)/).exec(text);
+      if (match) {
+        dueAmountMatch = match;
+        break;
+      }
+    }
     if (!dueAmountMatch) {
-      throw new HttpException('Could not extract due amount', HttpStatus.UNPROCESSABLE_ENTITY);
+      throw new HttpException('No se pudo extraer el monto a pagar', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
-    const minimumPaymentMatch = new RegExp(/\$\s*(-?[\d.,]+)/).exec(minimumPaymentCoordinatesText);
+    for (const text of minimumPaymentCoordinatesText) {
+      const match = new RegExp(/\$\s*(-?[\d.,]+)/).exec(text);
+      if (match) {
+        minimumPaymentMatch = match;
+        break;
+      }
+    }
     if (!minimumPaymentMatch) {
-      throw new HttpException('Could not extract minimum payment amount', HttpStatus.UNPROCESSABLE_ENTITY);
+      throw new HttpException('No se pudo extraer el pago mínimo', HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
-    const previousStatementDebtMatch = new RegExp(/\$\s*(-?[\d.,]+)/).exec(previousStatementDebtCoordinatesText);
+    for (const text of previousStatementDebtCoordinatesText) {
+      const match = new RegExp(/\s*(-?[\d.,]+)/).exec(text);
+      if (match) {
+        previousStatementDebtMatch = match;
+        break;
+      }
+    }
     if (!previousStatementDebtMatch) {
-      throw new HttpException('Could not extract previous statement debt amount', HttpStatus.UNPROCESSABLE_ENTITY);
+      throw new HttpException(
+        'No se pudo extraer el monto de la deuda del estado de cuenta anterior',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
     }
 
-    const creditCardId = await this.paymentMethodService.getIdByName(mainCreditCardNumberMatch[0]);
-    const billingPeriodStart = parse(billingPeriodMatch[0], 'dd-MM-yyyy', new Date());
-    const billingPeriodEnd = parse(billingPeriodMatch[1], 'dd-MM-yyyy', new Date());
+    const creditCards = await this.txHost.tx.find(PaymentMethod, {
+      select: {
+        id: true,
+        name: true,
+      },
+      where: {
+        createdById: 'c3983079-8ad2-4057-aa26-5418e1003563',
+      },
+    });
+
+    const creditCardsMap = new Map<string, PaymentMethod>();
+    for (const card of creditCards) {
+      if (!creditCardsMap.has(card.name)) {
+        creditCardsMap.set(card.name, card);
+      }
+    }
+
+    const mainCreditCardId = creditCardsMap.get(mainCreditCardNumberMatch[0])?.id;
+
+    if (!mainCreditCardId) {
+      throw new HttpException(
+        `Tarjeta de crédito terminada en "${mainCreditCardNumberMatch[0]}" no encontrada.`,
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    const billingPeriodStart = parse(normalizeDateString(billingPeriodMatchStartEnd[0]), 'dd-MM-yyyy', new Date());
+    const billingPeriodEnd = parse(normalizeDateString(billingPeriodMatchStartEnd[1]), 'dd-MM-yyyy', new Date());
 
     const checkRepeatedStatement = await this.creditCardStatementRepository.exists({
       where: {
-        creditCardId: creditCardId,
+        creditCardId: mainCreditCardId,
         billingPeriodStart: billingPeriodStart,
         billingPeriodEnd: billingPeriodEnd,
       },
     });
 
     if (checkRepeatedStatement) {
-      throw new HttpException('Statement already exists', HttpStatus.NOT_ACCEPTABLE);
+      throw new HttpException('Estado de cuenta ya existe', HttpStatus.NOT_ACCEPTABLE);
     }
 
-    // Extract totals
-    const totalOperationsMatch = new RegExp(/TOTAL OPERACIONES[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-    const totalPaymentsMatch = new RegExp(/TOTAL PAGOS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-    const totalPATMatch = new RegExp(/TOTAL PAT A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-    const totalInstallmentsMatch = new RegExp(/TOTAL COMPRAS EN CUOTAS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-    const totalChargesMatch = new RegExp(/CARGOS, COMISIONES[^$]*\$\s*(-?[\d.,]+)/).exec(text);
-    const totalUnbilledInstallmentsMatch = new RegExp(/4.INFORMACION COMPRAS EN CUOTAS[^$]*\$\s*(-?[\d.,]+)/).exec(
-      text,
+    const totalPaymentsMatch = new RegExp(/TOTAL PAGOS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(allTransactionsText);
+
+    const totalPATMatch = new RegExp(/TOTAL PAT A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/).exec(allTransactionsText);
+
+    let totalInstallmentsMatch: RegExpExecArray | null = null;
+    const totalInstallmentsRegexes = [
+      /TOTAL COMPRAS EN CUOTAS A LA CUENTA[^$]*\$\s*(-?[\d.,]+)/,
+      /TOTAL TRANSACCIONES EN CUOTAS [^$]*\$\s*(-?[\d.,]+)/,
+    ];
+    for (const regex of totalInstallmentsRegexes) {
+      const match = regex.exec(allTransactionsText);
+      if (match) {
+        totalInstallmentsMatch = match;
+        break;
+      }
+    }
+
+    // In banco de chile, in the new format, the totals are at the end of the tables. To identify the charges table, we first find the start of the table
+    const totalChargesTableStartMatch = new RegExp(/3.CARGOS, COMISIONES, IMPUESTOS Y ABONOS/).exec(
+      allTransactionsText,
+    );
+    if (!totalChargesTableStartMatch) {
+      throw new HttpException(
+        'No se pudo obtener el inicio de la tabla de cargos y comisiones',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    // There are two checks for retrocompatibility with previous banco de chile statements formats.
+    // 2nd is for older one
+    let totalChargesMatch: RegExpExecArray | null = null;
+    const totalChargesRegexes = [
+      /TOTAL CARGOS, COMISIONES, IMPUESTOS Y ABONOS[^$]*\$\s*(-?[\d.,]+)/,
+      /CARGOS, COMISIONES[^$]*\$\s*(-?[\d.,]+)/,
+    ];
+
+    for (const regex of totalChargesRegexes) {
+      const match = regex.exec(allTransactionsText);
+      if (match) {
+        totalChargesMatch = match;
+        break;
+      }
+    }
+
+    if (!totalChargesMatch) {
+      throw new HttpException('No se pudo extraer el total de cargos y comisiones', HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+    let totalUnbilledInstallmentsMatch = new RegExp(/4.INFORMACION COMPRAS EN CUOTAS[^$]*\$\s*(-?[\d.,]+)/).exec(
+      allTransactionsText,
     );
 
-    const parsedTotalOperations = totalOperationsMatch ? this.parseAmount(totalOperationsMatch[1]) : 0;
-    const parsedTotalCharges = totalChargesMatch ? this.parseAmount(totalChargesMatch[1]) : 0;
-    const parsedTotalUnbilledInstallments = totalUnbilledInstallmentsMatch
-      ? this.parseAmount(totalUnbilledInstallmentsMatch[1])
-      : 0;
+    if (
+      !totalUnbilledInstallmentsMatch &&
+      this.creditCardStatementCoordinates.unbilledStatementsTableStartCoordinates.coordinates.length > 0
+    ) {
+      totalUnbilledInstallmentsMatch = new RegExp(/4.INFORMACIÓN COMPRAS EN CUOTAS[^$]*\$\s*(-?[\d.,]+)/).exec(
+        allTransactionsText,
+      );
+    }
 
     // To identify multiple cards
-    const cardTotalPattern = /TOTAL TARJETA (X+\d{4})[^$]*\$\s*(-?[\d.,]+)/g;
-
-    const referenceMatches = text.matchAll(cardTotalPattern);
-    const creditCardsMatches = Array.from(referenceMatches).map((match) => ({
-      reference: match[1],
-      parsedTotal: this.parseAmount(match[2]),
-      index: match.index,
-    }));
+    const cardTotalPattern = /TOTAL TARJETA ([X\s-]+?\d{4})[^$]*\$\s*(-?[\d.,]+)/g;
+    const cardMatches = allTransactionsText.matchAll(cardTotalPattern);
+    const creditCardsMatches = Array.from(cardMatches).reduce<
+      {
+        number: string;
+        parsedTotal: number;
+        index: number;
+      }[]
+    >((accumulator, match) => {
+      if (creditCardsMap.has(match[1].slice(-4))) {
+        accumulator.push({
+          number: match[1],
+          parsedTotal: parseAmount(match[2]),
+          index: match.index,
+        });
+      } else {
+        throw new HttpException(
+          `Tarjeta de crédito terminada en "${match[1]}" no encontrada.`,
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        );
+      }
+      return accumulator;
+    }, []);
 
     // Sort credit cards by their position in text
     creditCardsMatches.sort((a, b) => a.index - b.index);
+
+    const parsedTotalOperations =
+      (totalPaymentsMatch ? parseAmount(totalPaymentsMatch[1]) : 0) +
+      (totalPATMatch ? parseAmount(totalPATMatch[1]) : 0) +
+      creditCardsMatches.reduce((sum, card) => sum + card.parsedTotal, 0) +
+      parseAmount(totalInstallmentsMatch?.[1] ?? '0');
+
+    const parsedTotalCharges = parseAmount(totalChargesMatch[1]);
+    const parsedTotalUnbilledInstallments = totalUnbilledInstallmentsMatch
+      ? parseAmount(totalUnbilledInstallmentsMatch[1])
+      : 0;
 
     const location = String.raw`([A-Z]+(?:\s+[A-Z]+)*)?`; // Uppercase words with spaces, optional
     const date = String.raw`\d{2}/\d{2}/\d{2}`; // DD/MM/YY
@@ -423,15 +689,15 @@ export class CreditCardStatementService {
       'g',
     );
 
-    const transactionMatches = text.matchAll(transactionPattern);
+    const transactionMatches = allTransactionsText.matchAll(transactionPattern);
 
     for (const match of transactionMatches) {
       const [, location, date, code, description, operationAmount, totalAmount, installments, monthlyAmount] = match;
 
       const transactionIndex = match.index;
-      const parsedMonthlyAmount = this.parseAmount(monthlyAmount);
-      const parsedOperationAmount = this.parseAmount(operationAmount);
-      const parsedTotalAmount = this.parseAmount(totalAmount);
+      const parsedMonthlyAmount = parseAmount(monthlyAmount);
+      const parsedOperationAmount = parseAmount(operationAmount);
+      const parsedTotalAmount = parseAmount(totalAmount);
 
       const [parsedCurrentInstallment, parsedTotalInstallments] = installments
         .split('/')
@@ -442,12 +708,13 @@ export class CreditCardStatementService {
         date: date,
         referenceCode: code,
         description: description.trim(),
-        operationAmount: parsedOperationAmount,
-        totalAmount: parsedTotalAmount,
+        operationAmount: new Decimal(parsedOperationAmount),
+        totalAmount: new Decimal(parsedTotalAmount),
         currentInstallment: parsedCurrentInstallment,
         totalInstallments: parsedTotalInstallments,
-        monthlyAmount: parsedMonthlyAmount,
+        monthlyAmount: new Decimal(parsedMonthlyAmount),
         reference: '',
+        creditCard: '',
       };
 
       // The totals always appear at the end of the statement, so we can use their position to categorize transactions
@@ -456,25 +723,25 @@ export class CreditCardStatementService {
         this.addTransactionToCategory(
           transactionsMap,
           { ...transaction, reference: CreditCardStatementReferencesEnum.PAYMENT },
-          totalPayments,
-          parsedMonthlyAmount,
+          new Decimal(totalPayments),
+          new Decimal(parsedMonthlyAmount),
         );
       } else if (totalPATMatch && totalPATMatch.index > transactionIndex) {
         totalPAT += parsedMonthlyAmount;
         this.addTransactionToCategory(
           transactionsMap,
           { ...transaction, reference: CreditCardStatementReferencesEnum.PAT },
-          totalPAT,
-          parsedMonthlyAmount,
+          new Decimal(totalPAT),
+          new Decimal(parsedMonthlyAmount),
         );
       } else if (
         creditCardsMatches.some((card) => {
           if (card.index > transactionIndex) {
             this.addTransactionToCategory(
               transactionsMap,
-              { ...transaction, reference: card.reference },
-              card.parsedTotal,
-              parsedMonthlyAmount,
+              { ...transaction, creditCard: card.number, reference: CreditCardStatementReferencesEnum.TRANSACTION },
+              new Decimal(card.parsedTotal),
+              new Decimal(parsedMonthlyAmount),
             );
             return true;
           }
@@ -486,8 +753,8 @@ export class CreditCardStatementService {
         this.addTransactionToCategory(
           transactionsMap,
           { ...transaction, reference: CreditCardStatementReferencesEnum.INSTALLMENT },
-          totalInstallments,
-          parsedMonthlyAmount,
+          new Decimal(totalInstallments),
+          new Decimal(parsedMonthlyAmount),
         );
       }
       // In banco de chile, unbilled staments table does not always appear
@@ -497,8 +764,8 @@ export class CreditCardStatementService {
           this.addTransactionToCategory(
             transactionsMap,
             { ...transaction, reference: CreditCardStatementReferencesEnum.CHARGE },
-            totalCharges,
-            parsedMonthlyAmount,
+            new Decimal(totalCharges),
+            new Decimal(parsedMonthlyAmount),
           );
         } else if (totalUnbilledInstallmentsMatch.index < transactionIndex) {
           // For some reason, unbilled statements total uses operation amount instead of monthly amount
@@ -506,18 +773,18 @@ export class CreditCardStatementService {
           this.addTransactionToCategory(
             transactionsMap,
             { ...transaction, reference: CreditCardStatementReferencesEnum.UNBILLED_INSTALLMENT },
-            totalUnbilledInstallments,
-            parsedMonthlyAmount,
+            new Decimal(totalUnbilledInstallments),
+            new Decimal(parsedMonthlyAmount),
           );
         }
-      } else if (totalChargesMatch && totalChargesMatch.index < transactionIndex) {
+      } else if (totalChargesTableStartMatch && totalChargesTableStartMatch.index < transactionIndex) {
         // Charges do not have end total, so we assume they appear after all cards
         totalCharges += parsedMonthlyAmount;
         this.addTransactionToCategory(
           transactionsMap,
           { ...transaction, reference: CreditCardStatementReferencesEnum.CHARGE },
-          totalCharges,
-          parsedMonthlyAmount,
+          new Decimal(totalCharges),
+          new Decimal(parsedMonthlyAmount),
         );
       }
     }
@@ -526,29 +793,29 @@ export class CreditCardStatementService {
 
     if (parsedTotalOperations !== totalCalculatedOperations) {
       throw new HttpException(
-        `Parsed operations do not match parsed value: ${parsedTotalOperations} !== ${totalCalculatedOperations}`,
+        `Operaciones parseadas no coinciden con el total parseado: ${parsedTotalOperations} !== ${totalCalculatedOperations}`,
         HttpStatus.UNPROCESSABLE_ENTITY,
       );
     } else if (parsedTotalCharges !== totalCharges) {
       throw new HttpException(
-        `Parsed charges do not match parsed value: ${parsedTotalCharges} !== ${totalCharges}`,
+        `Los cargos parseados no coinciden con el total parseado: ${parsedTotalCharges} !== ${totalCharges}`,
         HttpStatus.UNPROCESSABLE_ENTITY,
       );
     } else if (parsedTotalUnbilledInstallments !== totalUnbilledInstallments) {
       throw new HttpException(
-        `Parsed unbilled installments do not match parsed value: ${parsedTotalUnbilledInstallments} !== ${totalUnbilledInstallments}`,
+        `Los cargos no facturados parseados no coinciden con el total parseado: ${parsedTotalUnbilledInstallments} !== ${totalUnbilledInstallments}`,
         HttpStatus.UNPROCESSABLE_ENTITY,
       );
     }
 
     const parsedStatement = await this.txHost.tx.save(CreditCardStatement, {
-      creditCardId: creditCardId,
+      creditCardId: mainCreditCardId,
       billingPeriodStart: billingPeriodStart,
       billingPeriodEnd: billingPeriodEnd,
       dueDate: parse(dueDateMatch[0], 'dd/MM/yyyy', new Date()),
-      dueAmount: this.parseAmount(dueAmountMatch[1]),
-      minimumPayment: this.parseAmount(minimumPaymentMatch[1]),
-      previousStatementDebt: this.parseAmount(previousStatementDebtMatch[1]),
+      dueAmount: parseAmount(dueAmountMatch[1]),
+      minimumPayment: parseAmount(minimumPaymentMatch[1]),
+      previousStatementDebt: parseAmount(previousStatementDebtMatch[1]),
       totalOperations: totalCalculatedOperations,
       totalPayments,
       totalPAT,
@@ -574,28 +841,623 @@ export class CreditCardStatementService {
     };
   }
 
-  private parseAmount(amountStr: string): number {
-    // Remove currency symbols, spaces, thousand separators, and convert Chilean decimal format
-    // Chilean format: 1.234.567,89 or -1.234.567,89
-    return parseFloat(amountStr.replace(/[$\s.,]/g, (match) => (match === ',' ? '.' : '')));
+  @Transactional()
+  async parseTransactionTextLiderBci(
+    mainCreditCard: string[],
+    billingPeriodStartEnd: string[],
+    dueDateText: string[],
+    dueAmountText: string[],
+    minimumPaymentCoordinatesText: string[],
+    previousStatementDebt: number,
+    allTransactionsText: string,
+  ): Promise<ParsedStatement> {
+    const transactionsMap: Map<string, TransactionCategory> = new Map();
+
+    const mainCreditCardNumberMatch = matchTextWithPattern(mainCreditCard, new RegExp(/\d{4}(?=\D*$)/));
+    if (!mainCreditCardNumberMatch) {
+      throw new HttpException(
+        'No se pudo extraer el número de tarjeta de crédito principal',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    const billingPeriodMatchStartEnd: string[] = matchMultipleTextWithPattern(
+      billingPeriodStartEnd,
+      new RegExp(/\d{2}[-/]\d{2}[-/]\d{4}/g),
+    );
+    if (billingPeriodMatchStartEnd.length === 0) {
+      throw new HttpException('No se pudo extraer el período facturado', HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    const dueDateMatch: RegExpExecArray | null = matchTextWithPattern(dueDateText, new RegExp(/\d{2}\/\d{2}\/\d{4}/));
+    if (!dueDateMatch) {
+      throw new HttpException('No se pudo extraer la fecha de vencimiento', HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    const dueAmountMatch: RegExpExecArray | null = matchTextWithPattern(dueAmountText, new RegExp(/\$\s*(-?[\d.,]+)/));
+    if (!dueAmountMatch) {
+      throw new HttpException('No se pudo extraer el monto a pagar', HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    const minimumPaymentMatch: RegExpExecArray | null = matchTextWithPattern(
+      minimumPaymentCoordinatesText,
+      new RegExp(/\$\s*(-?[\d.,]+)/),
+    );
+    if (!minimumPaymentMatch) {
+      throw new HttpException('No se pudo extraer el pago mínimo', HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    const creditCardsMap = await this.paymentMethodService.getActivePaymentMethodsMap(
+      'c3983079-8ad2-4057-aa26-5418e1003563',
+    );
+
+    const mainCreditCardId = creditCardsMap.get(mainCreditCardNumberMatch[0])?.id;
+
+    if (!mainCreditCardId) {
+      throw new HttpException(
+        `Tarjeta de crédito terminada en "${mainCreditCardNumberMatch[0]}" no encontrada.`,
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    const billingPeriodStart = parse(normalizeDateString(billingPeriodMatchStartEnd[0]), 'dd-MM-yyyy', new Date());
+    const billingPeriodEnd = parse(normalizeDateString(billingPeriodMatchStartEnd[1]), 'dd-MM-yyyy', new Date());
+
+    const checkRepeatedStatement = await this.checkIfStatementExists(
+      mainCreditCardId,
+      billingPeriodStart,
+      billingPeriodEnd,
+    );
+
+    if (checkRepeatedStatement) {
+      throw new HttpException('Estado de cuenta ya existe', HttpStatus.NOT_ACCEPTABLE);
+    }
+
+    const {
+      categorizedTotals,
+      liderMatch,
+      otrosComerciosMatch,
+      productosServiciosMatch,
+      cargosComisionesMatch,
+      pagoMatch,
+    } = this.categorizeLiderBciTotals(allTransactionsText);
+
+    const { liderParsedTotals, otrosComerciosParsedTotals, cargosParsedTotals, pagoParsedTotals } = categorizedTotals;
+
+    const location = String.raw`([A-Z]+(?:\s+[A-Z]+)*)?`; // Uppercase words with spaces, optional
+    const date = String.raw`\d{2}/\d{2}/\d{4}`; // DD/MM/YYYY (not YY!)
+    const installments = String.raw`\d{2}/\d{2}`; // MM/MM
+    const description = String.raw`[^$]+?`; // Any text until $
+    const amount = String.raw`[-]?\d{1,3}(?:\.\d{3})*`; // Number with periods as thousands separator
+    const whitespace = String.raw`\s+`;
+    const optionalWhitespace = String.raw`\s*`;
+
+    // Transaction pattern for items with (T) or (A) markers
+    const transactionPattern = new RegExp(
+      String.raw`${location}${whitespace}` +
+        String.raw`(${date})${whitespace}` +
+        String.raw`(${description})${whitespace}` +
+        String.raw`\$${optionalWhitespace}(${amount})` +
+        String.raw`(?:${whitespace}\$${optionalWhitespace}(${amount})${whitespace}(${installments})${whitespace}\$${optionalWhitespace}(${amount}))?`, // Optional installment info
+      'g',
+    );
+
+    const transactionMatches = allTransactionsText.matchAll(transactionPattern);
+
+    const {
+      totalLiderMain,
+      totalLiderAdditional,
+      totalOtrosComerciosMain,
+      totalOtrosComerciosAdditional,
+      totalCargosComisiones,
+      totalCargosComisionesAdditional,
+      totalPago,
+      totalInstallments,
+    } = this.categorizeLiderBciTransactions(
+      transactionMatches,
+      {
+        liderMatch,
+        otrosComerciosMatch,
+        productosServiciosMatch,
+        cargosComisionesMatch,
+        pagoMatch,
+      },
+      categorizedTotals,
+      transactionsMap,
+    );
+
+    liderParsedTotals.forEach((total, index) => {
+      const isMainCard = index === 0;
+      const expectedTotal = isMainCard ? totalLiderMain : totalLiderAdditional;
+      const cardType = isMainCard ? 'Principal' : 'Adicional';
+
+      if (total.parsedAmount !== expectedTotal) {
+        throw new HttpException(
+          `Total de LIDER (${cardType}) no coincide: ${total.parsedAmount} !== ${expectedTotal}`,
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        );
+      }
+    });
+    otrosComerciosParsedTotals.forEach((total, index) => {
+      const isMainCard = index === 0;
+      const expectedTotal = isMainCard ? totalOtrosComerciosMain : totalOtrosComerciosAdditional;
+      const cardType = isMainCard ? 'Principal' : 'Adicional';
+
+      if (total.parsedAmount !== expectedTotal) {
+        throw new HttpException(
+          `Total de OTROS COMERCIOS (${cardType}) no coincide: ${total.parsedAmount} !== ${expectedTotal}`,
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        );
+      }
+    });
+
+    if (cargosParsedTotals[0] && cargosParsedTotals[0].parsedAmount !== totalCargosComisiones) {
+      throw new HttpException(
+        `Total de CARGOS Y COMISIONES no coincide: ${cargosParsedTotals[0].parsedAmount} !== ${totalCargosComisiones}`,
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    if (cargosParsedTotals[1] && cargosParsedTotals[1].parsedAmount !== totalCargosComisionesAdditional) {
+      throw new HttpException(
+        `Total de CARGOS Y COMISIONES (2) no coincide: ${cargosParsedTotals[1].parsedAmount} !== ${totalCargosComisionesAdditional}`,
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    if (pagoParsedTotals[0] && pagoParsedTotals[0].parsedAmount !== totalPago) {
+      throw new HttpException(
+        `Total de PAGO no coincide: ${pagoParsedTotals[0].parsedAmount} !== ${totalPago}`,
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    const parsedStatement = await this.txHost.tx.save(CreditCardStatement, {
+      creditCardId: mainCreditCardId,
+      billingPeriodStart: billingPeriodStart,
+      billingPeriodEnd: billingPeriodEnd,
+      dueDate: parse(dueDateMatch[0], 'dd/MM/yyyy', new Date()),
+      dueAmount: parseAmount(dueAmountMatch[1]),
+      minimumPayment: parseAmount(minimumPaymentMatch[1]),
+      previousStatementDebt: previousStatementDebt,
+      totalOperations: totalLiderMain + totalLiderAdditional + totalOtrosComerciosMain + totalOtrosComerciosAdditional,
+      totalPayments: totalPago,
+      totalPAT: 0,
+      totalTransactions:
+        totalLiderMain + totalLiderAdditional + totalOtrosComerciosMain + totalOtrosComerciosAdditional,
+      totalInstallments,
+      totalCharges: totalCargosComisiones,
+      totalUnbilledInstallments: null,
+      createdById: 'c3983079-8ad2-4057-aa26-5418e1003563',
+    });
+
+    await this.expensesService.saveParsedExpensesFromCreditCardStatement({
+      ...parsedStatement,
+      creditCardStatementId: parsedStatement.id,
+      mainCreditCard: mainCreditCardNumberMatch[0],
+      transactions: Object.fromEntries(transactionsMap),
+    });
+
+    return {
+      ...parsedStatement,
+      creditCardStatementId: parsedStatement.id,
+      mainCreditCard: mainCreditCardNumberMatch[0],
+      transactions: Object.fromEntries(transactionsMap),
+    };
   }
 
+  private categorizeLiderBciTransactions(
+    transactionMatches: RegExpStringIterator<RegExpExecArray>,
+    totalsMatches: {
+      liderMatch: RegExpExecArray | null;
+      otrosComerciosMatch: RegExpExecArray | null;
+      productosServiciosMatch: RegExpExecArray | null;
+      cargosComisionesMatch: RegExpExecArray | null;
+      pagoMatch: RegExpExecArray | null;
+    },
+    categorizedTotals: {
+      liderParsedTotals: TotalMatch[];
+      otrosComerciosParsedTotals: TotalMatch[];
+      cargosParsedTotals: TotalMatch[];
+      pagoParsedTotals: TotalMatch[];
+    },
+    transactionsMap: Map<string, TransactionCategory>,
+  ) {
+    let totalLiderMain = 0;
+    let totalLiderAdditional = 0;
+    let totalOtrosComerciosMain = 0;
+    let totalOtrosComerciosAdditional = 0;
+    let totalCargosComisiones = 0;
+    let totalCargosComisionesAdditional = 0;
+    let totalInstallments = 0;
+    let totalPago = 0;
+
+    const { liderParsedTotals, otrosComerciosParsedTotals, cargosParsedTotals, pagoParsedTotals } = categorizedTotals;
+    const { liderMatch, otrosComerciosMatch, productosServiciosMatch, cargosComisionesMatch, pagoMatch } =
+      totalsMatches;
+
+    for (const match of transactionMatches) {
+      const [, location, date, description, operationAmount, totalAmount, installments, monthlyAmount] = match;
+
+      const transactionIndex = match.index;
+      const parsedOperationAmount = parseAmount(operationAmount);
+
+      // Determine if it's a regular (T) or additional card (A) transaction
+      const isAdditionalCard = description.includes('(A)');
+
+      // Parse installment data if present
+      let parsedCurrentInstallment = 1;
+      let parsedTotalInstallments = 1;
+      let parsedMonthlyAmount = parsedOperationAmount;
+      let parsedTotalAmount = parsedOperationAmount;
+
+      if (installments && monthlyAmount && totalAmount) {
+        [parsedCurrentInstallment, parsedTotalInstallments] = installments
+          .split('/')
+          .map((installment) => Number.parseInt(installment));
+        parsedMonthlyAmount = parseAmount(monthlyAmount);
+        parsedTotalAmount = parseAmount(totalAmount);
+        totalInstallments += parsedMonthlyAmount;
+      }
+
+      const transaction: Transaction = {
+        location: location || 'N/A',
+        date: date,
+        description: description.trim(),
+        operationAmount: new Decimal(parsedOperationAmount),
+        totalAmount: new Decimal(parsedTotalAmount),
+        currentInstallment: parsedCurrentInstallment,
+        totalInstallments: parsedTotalInstallments,
+        monthlyAmount: new Decimal(parsedMonthlyAmount),
+        reference: '',
+        referenceCode: '',
+        creditCard: isAdditionalCard ? 'ADDITIONAL' : 'MAIN',
+      };
+
+      // Categorize based on position relative to totals
+      if (
+        liderMatch &&
+        otrosComerciosMatch &&
+        transactionIndex >= liderMatch.index &&
+        transactionIndex < otrosComerciosMatch.index
+      ) {
+        if (isAdditionalCard) {
+          this.addAdditionalCardTransactionToLiderBciCategory(
+            liderParsedTotals,
+            transactionIndex,
+            parsedMonthlyAmount,
+            transactionsMap,
+            transaction,
+            { totalLiderMain, totalLiderAdditional },
+          );
+          totalLiderAdditional += parsedMonthlyAmount;
+        } else {
+          this.addMainCardTransactionToLiderBciCategory(
+            liderParsedTotals,
+            transactionIndex,
+            parsedMonthlyAmount,
+            transactionsMap,
+            transaction,
+            { totalLiderMain, totalLiderAdditional },
+          );
+          totalLiderMain += parsedMonthlyAmount;
+        }
+      } else if (
+        otrosComerciosMatch &&
+        productosServiciosMatch &&
+        transactionIndex >= otrosComerciosMatch.index &&
+        transactionIndex < productosServiciosMatch.index
+      ) {
+        if (isAdditionalCard) {
+          this.addAdditionalCardTransactionToOtrosComerciosCategory(
+            otrosComerciosParsedTotals,
+            transactionIndex,
+            parsedMonthlyAmount,
+            transactionsMap,
+            transaction,
+            { totalOtrosComerciosMain, totalOtrosComerciosAdditional },
+          );
+          totalOtrosComerciosAdditional += parsedMonthlyAmount;
+        } else {
+          this.addMainCardTransactionToOtrosComerciosCategory(
+            otrosComerciosParsedTotals,
+            transactionIndex,
+            parsedMonthlyAmount,
+            transactionsMap,
+            transaction,
+            { totalOtrosComerciosMain, totalOtrosComerciosAdditional },
+          );
+          totalOtrosComerciosMain += parsedMonthlyAmount;
+        }
+      } else if (
+        cargosComisionesMatch &&
+        transactionIndex >= cargosComisionesMatch.index &&
+        transactionIndex < pagoMatch!.index - 20
+      ) {
+        if (isAdditionalCard) {
+          totalCargosComisionesAdditional += parsedMonthlyAmount;
+        } else {
+          totalCargosComisiones += parsedMonthlyAmount;
+        }
+
+        this.addTransactionToCategory(
+          transactionsMap,
+          { ...transaction, reference: CreditCardStatementReferencesEnum.CHARGE },
+          new Decimal(cargosParsedTotals[isAdditionalCard ? 1 : 0]?.parsedAmount ?? 0),
+          new Decimal(parsedMonthlyAmount),
+        );
+      } else if (pagoMatch && transactionIndex >= pagoMatch.index - 20) {
+        totalPago += parsedMonthlyAmount;
+
+        this.addTransactionToCategory(
+          transactionsMap,
+          { ...transaction, reference: CreditCardStatementReferencesEnum.PAYMENT },
+          new Decimal(pagoParsedTotals[0]?.parsedAmount ?? 0),
+          new Decimal(parsedMonthlyAmount),
+        );
+      }
+    }
+    return {
+      totalLiderMain,
+      totalLiderAdditional,
+      totalOtrosComerciosMain,
+      totalOtrosComerciosAdditional,
+      totalCargosComisiones,
+      totalCargosComisionesAdditional,
+      totalInstallments,
+      totalPago,
+    };
+  }
+
+  private addMainCardTransactionToLiderBciCategory(
+    liderParsedTotals: TotalMatch[],
+    transactionIndex: number,
+    parsedMonthlyAmount: number,
+    transactionsMap: Map<string, TransactionCategory>,
+    transaction: Transaction,
+    totals: { totalLiderMain: number; totalLiderAdditional: number },
+  ) {
+    // Find the main card total (first total in LIDER section)
+    const mainTotal = liderParsedTotals.find((t) => t.index > transactionIndex);
+    totals.totalLiderMain += parsedMonthlyAmount;
+
+    this.addTransactionToCategory(
+      transactionsMap,
+      { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
+      new Decimal(mainTotal?.parsedAmount ?? 0),
+      new Decimal(parsedMonthlyAmount),
+    );
+  }
+
+  private addAdditionalCardTransactionToLiderBciCategory(
+    liderParsedTotals: TotalMatch[],
+    transactionIndex: number,
+    parsedMonthlyAmount: number,
+    transactionsMap: Map<string, TransactionCategory>,
+    transaction: Transaction,
+    totals: { totalLiderMain: number; totalLiderAdditional: number },
+  ) {
+    // Find the additional card total (second total in LIDER section)
+    const additionalTotal = liderParsedTotals.find((t) => t.index > transactionIndex);
+    totals.totalLiderAdditional += parsedMonthlyAmount;
+
+    this.addTransactionToCategory(
+      transactionsMap,
+      { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
+      new Decimal(additionalTotal?.parsedAmount ?? 0),
+      new Decimal(parsedMonthlyAmount),
+    );
+  }
+
+  private addMainCardTransactionToOtrosComerciosCategory(
+    otrosComerciosParsedTotals: TotalMatch[],
+    transactionIndex: number,
+    parsedMonthlyAmount: number,
+    transactionsMap: Map<string, TransactionCategory>,
+    transaction: Transaction,
+    totals: { totalOtrosComerciosMain: number; totalOtrosComerciosAdditional: number },
+  ) {
+    // Find the main card total in OTROS COMERCIOS section
+    const mainTotal = otrosComerciosParsedTotals.find((t) => t.index > transactionIndex);
+    totals.totalOtrosComerciosMain += parsedMonthlyAmount;
+
+    this.addTransactionToCategory(
+      transactionsMap,
+      { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
+      new Decimal(mainTotal?.parsedAmount ?? 0),
+      new Decimal(parsedMonthlyAmount),
+    );
+  }
+
+  private addAdditionalCardTransactionToOtrosComerciosCategory(
+    otrosComerciosParsedTotals: TotalMatch[],
+    transactionIndex: number,
+    parsedMonthlyAmount: number,
+    transactionsMap: Map<string, TransactionCategory>,
+    transaction: Transaction,
+    totals: { totalOtrosComerciosMain: number; totalOtrosComerciosAdditional: number },
+  ) {
+    // Find the additional card total in OTROS COMERCIOS section
+    const additionalTotal = otrosComerciosParsedTotals.find((t) => t.index > transactionIndex);
+    totals.totalOtrosComerciosAdditional += parsedMonthlyAmount;
+
+    this.addTransactionToCategory(
+      transactionsMap,
+      { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
+      new Decimal(additionalTotal?.parsedAmount ?? 0),
+      new Decimal(parsedMonthlyAmount),
+    );
+  }
+
+  private categorizeLiderBciTotals(text: string) {
+    // Section markers to help categorize transactions
+    const sectionMarkers = {
+      // Match LIDER when it appears after "Total Operaciones" and before a location
+      lider: /1\.\s*Total Operaciones\s+LIDER/m,
+
+      // Match OTROS COMERCIOS as a section header
+      otrosComerciosStart: /OTROS COMERCIOS\s+[A-Z]/m,
+
+      // Products section
+      productosServicios: /2\.\s*Productos o Servicios Voluntariamente Contratados/m,
+
+      // Charges section
+      cargosComisiones: /3\.\s*Cargos.*Comisiones.*Impuestos.*Abonos/m,
+
+      // PAGO with date before it
+      pagoMarker: /\d{2}\/\d{2}\/\d{4}\s+PAGO/m,
+    };
+
+    // Pattern to match totals: $ amount that is preceded by another $ amount
+    const totalPattern = /\$\s+-?\d{1,3}(?:\.\d{3})*\s+\$\s+(-?\d{1,3}(?:\.\d{3})*)/gm;
+
+    // Find section markers with their positions
+    const liderMatch = sectionMarkers.lider.exec(text);
+    const otrosComerciosMatch = sectionMarkers.otrosComerciosStart.exec(text);
+    const productosServiciosMatch = sectionMarkers.productosServicios.exec(text);
+    const cargosComisionesMatch = sectionMarkers.cargosComisiones.exec(text);
+    const pagoMatch = sectionMarkers.pagoMarker.exec(text);
+
+    const allTotals = this.findLiderBciTotals(text, totalPattern);
+
+    const categorizedTotals = allTotals.reduce(
+      (accumulator, total) => {
+        if (
+          liderMatch &&
+          otrosComerciosMatch &&
+          total.index > liderMatch.index &&
+          total.index < otrosComerciosMatch.index
+        ) {
+          accumulator.liderParsedTotals.push(total);
+        } else if (
+          otrosComerciosMatch &&
+          productosServiciosMatch &&
+          total.index > otrosComerciosMatch.index &&
+          total.index < productosServiciosMatch.index
+        ) {
+          accumulator.otrosComerciosParsedTotals.push(total);
+        } else if (
+          cargosComisionesMatch &&
+          pagoMatch &&
+          total.index > cargosComisionesMatch.index &&
+          total.index < pagoMatch.index
+        ) {
+          accumulator.cargosParsedTotals.push(total);
+        } else if (pagoMatch && total.index > pagoMatch.index) {
+          accumulator.pagoParsedTotals.push(total);
+        }
+        return accumulator;
+      },
+      {
+        liderParsedTotals: [] as TotalMatch[],
+        otrosComerciosParsedTotals: [] as TotalMatch[],
+        cargosParsedTotals: [] as TotalMatch[],
+        pagoParsedTotals: [] as TotalMatch[],
+      },
+    );
+    return {
+      categorizedTotals,
+      liderMatch,
+      otrosComerciosMatch,
+      productosServiciosMatch,
+      cargosComisionesMatch,
+      pagoMatch,
+    };
+  }
+
+  private findLiderBciTotals(text: string, totalPattern: RegExp): TotalMatch[] {
+    const totals: TotalMatch[] = [];
+    const matches = text.matchAll(totalPattern);
+
+    for (const match of matches) {
+      if (match.index !== undefined) {
+        const matchEnd = match.index + match[0].length;
+        const remainingText = text.substring(matchEnd, matchEnd + 30);
+
+        // Check if followed by installment pattern: XX/XX followed by $ (not a date)
+        // Installments look like: "   03/03   $  44.751"
+        // Dates look like: " 30/05/2025 PAGO"
+        const hasInstallmentAfter = /^\s+\d{2}\/\d{2}\s+\$/.test(remainingText);
+
+        if (!hasInstallmentAfter) {
+          totals.push({
+            amount: match[1],
+            parsedAmount: parseAmount(match[1]),
+            index: match.index + match[0].indexOf('$', 1),
+          });
+        }
+      }
+    }
+
+    return totals;
+  }
   private addTransactionToCategory(
     transactionsMap: Map<string, TransactionCategory>,
     transaction: Transaction,
-    parsedTotalAmount: number,
-    parsedMonthlyAmount: number,
+    parsedTotalAmount: Decimal,
+    parsedMonthlyAmount: Decimal,
   ) {
     const { reference } = transaction;
     if (!transactionsMap.has(reference)) {
-      transactionsMap.set(reference, { transactions: [], parsedTotal: 0, calculatedTotal: 0 });
+      transactionsMap.set(reference, {
+        transactions: [],
+        parsedTotal: new Decimal(0),
+        calculatedTotal: new Decimal(0),
+      });
     }
     const category = transactionsMap.get(reference);
     if (category) {
       category.transactions.push(transaction);
       category.parsedTotal = parsedTotalAmount;
-      category.calculatedTotal += parsedMonthlyAmount;
+      category.calculatedTotal = category.calculatedTotal.add(parsedMonthlyAmount);
+      category.reference = reference;
     }
+  }
+
+  async checkIfStatementExists(mainCreditCardId: string, billingPeriodStart: Date, billingPeriodEnd: Date) {
+    return await this.creditCardStatementRepository.exists({
+      where: {
+        creditCardId: mainCreditCardId,
+        billingPeriodStart: billingPeriodStart,
+        billingPeriodEnd: billingPeriodEnd,
+      },
+    });
+  }
+
+  /**
+   * Calculate the top and bottom bounds for a region based on page position
+   */
+  private calculateRegionBounds(
+    currentPage: number,
+    lastPage: number,
+    pageHeight: number,
+    endCoordinates: TransactionsCoordinates,
+  ): RegionBounds {
+    let bottom = 0;
+    let top = 0;
+
+    if (this.bankToParse === CreditCardStatementBanks.BancoDeChile) {
+      if (currentPage === 0) {
+        // For Banco de Chile, footer text appears ~200 points from bottom on first page
+        bottom = 200;
+      } else if (currentPage === lastPage) {
+        // For Banco de Chile, on the last transaction page, stop above the "III. INFORMACIÓN DE PAGO" section with 50 padding
+        bottom = pageHeight - (endCoordinates.y + endCoordinates.height) + 25;
+      }
+      if (currentPage !== 0) {
+        // For Banco de Chile, on intermediate pages, add 50 padding at top to remove repeated headers
+        top = 30;
+      }
+    } else if (this.bankToParse === CreditCardStatementBanks.LiderBCI) {
+      if (currentPage !== 0) {
+        top = 42;
+        if (currentPage === lastPage) {
+          // For Lider BCI, on the last transaction page, stop above the "III. INFORMACIÓN DE PAGO" section with 10 padding
+          bottom = pageHeight - (endCoordinates.y + endCoordinates.height) + 20;
+        }
+      }
+    }
+
+    return { bottom, top };
   }
 
   /**
@@ -606,7 +1468,13 @@ export class CreditCardStatementService {
     const outputPath = filePath ? `${filePath}/${fileName}` : path.join(process.cwd(), fileName);
 
     if (!this.creditCardStatementPDF) {
-      this.creditCardStatementPDF = await PDFDocument.load(file.buffer);
+      try {
+        this.creditCardStatementPDF = await PDFDocument.load(file.buffer);
+      } catch (error) {
+        if (error.message.includes('encrypted') || error.message.includes('password')) {
+          throw new HttpException('Pdf con contraseña no es soportado', HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+      }
     }
     const pdfDoc = this.creditCardStatementPDF;
     const pages = pdfDoc.getPages();
@@ -617,15 +1485,15 @@ export class CreditCardStatementService {
     let totalHeight = 0;
     let maxWidth = 0;
 
-    for (const item of this.transactionsTableCoordinates) {
+    for (const item of this.creditCardStatementCoordinates.transactionsTable.coordinates) {
       const targetPage = pages[item.page];
       const { width: pageWidth, height: pageHeight } = targetPage.getSize();
 
       const bounds = this.calculateRegionBounds(
         item.page,
-        this.transactionsEndCoordinates[0].page,
+        this.creditCardStatementCoordinates.transactionsEnd.coordinates[0].page,
         pageHeight,
-        this.transactionsEndCoordinates[0],
+        this.creditCardStatementCoordinates.transactionsEnd.coordinates[0],
       );
 
       const cutHeight = pageHeight - item.y - bounds.bottom - bounds.top;
@@ -652,9 +1520,9 @@ export class CreditCardStatementService {
 
       const bounds = this.calculateRegionBounds(
         region.page,
-        this.transactionsEndCoordinates[0].page,
+        this.creditCardStatementCoordinates.transactionsEnd.coordinates[0].page,
         pageHeight,
-        this.transactionsEndCoordinates[0],
+        this.creditCardStatementCoordinates.transactionsEnd.coordinates[0],
       );
 
       const embeddedPage = await newPdfDoc.embedPage(targetPage, {
@@ -677,5 +1545,221 @@ export class CreditCardStatementService {
     fs.writeFile(outputPath, newPdfBytes);
 
     return outputPath;
+  }
+
+  async getLatestCreditCardStatementDateByCreditCard(creditCardId: string) {
+    const latestStatement = await this.creditCardStatementRepository.find({
+      select: {
+        id: true,
+        billingPeriodEnd: true,
+      },
+      where: {
+        creditCardId: creditCardId,
+        createdById: 'c3983079-8ad2-4057-aa26-5418e1003563',
+      },
+      order: {
+        billingPeriodEnd: 'DESC',
+      },
+    });
+
+    return latestStatement.length > 0 ? latestStatement[0].billingPeriodEnd : null;
+  }
+
+  async getCreditCardDebtByMonth(date: Date): Promise<CreditCardsDebt> {
+    const activeCreditCards = await this.paymentMethodService.getActiveCreditCards(
+      'c3983079-8ad2-4057-aa26-5418e1003563',
+    );
+
+    const creditCardIds = activeCreditCards.map((card) => card.id);
+
+    const latestStatementsMap = await this.findStatementsForCurrentMonth(creditCardIds);
+
+    const [billedExpensesByStatementMap, unbilledExpensesByCreditCardMap, referencesMap] = await Promise.all([
+      this.expensesService.getExpensesMapByCreditCardStatementIds(
+        Array.from(latestStatementsMap.values()).map((statement) => statement.id),
+      ),
+      this.expensesService.getUnbilledExpensesMapByCreditCardIds(creditCardIds),
+      this.getReferencesMap(),
+    ]);
+
+    const debt: CreditCardsDebt = {
+      month: date.toLocaleString('es-CL', { month: 'long' }),
+      creditCards: [],
+      totalDebt: new Decimal(0),
+    };
+
+    for (const card of activeCreditCards) {
+      const statement = latestStatementsMap.get(card.id);
+      const transactionsMap = await this.buildTransactionsMap(
+        card,
+        statement,
+        billedExpensesByStatementMap,
+        unbilledExpensesByCreditCardMap,
+        referencesMap,
+      );
+
+      let cardDebt = null;
+      cardDebt = await this.createUnbilledCardDebt(card, transactionsMap.get('unbilled') ?? new Map());
+      debt.totalDebt = debt.totalDebt.add(cardDebt.unbilledStatements?.total ?? new Decimal(0));
+      if (statement) {
+        const billedCardDebt = this.createBilledCardDebt(card, statement, transactionsMap.get('billed') ?? new Map());
+        cardDebt.billedStatements = billedCardDebt.billedStatements;
+      }
+
+      debt.creditCards.push(cardDebt);
+    }
+
+    return debt;
+  }
+
+  async findStatementsForCurrentMonth(paymentMethodsIds: string[]): Promise<Map<string, CreditCardStatement>> {
+    const now = new Date();
+    const currentMonth = now.getMonth() + 1; // 1-12
+    const currentYear = now.getFullYear();
+    const statements = await this.creditCardStatementRepository
+      .createQueryBuilder('statement')
+      .where('EXTRACT(MONTH FROM statement.billingPeriodEnd) = :month', { month: currentMonth })
+      .andWhere('EXTRACT(YEAR FROM statement.billingPeriodEnd) = :year', { year: currentYear })
+      .andWhere('statement.createdById = :userId', { userId: 'c3983079-8ad2-4057-aa26-5418e1003563' })
+      .andWhere('statement.creditCardId IN (:...paymentMethodsIds)', { paymentMethodsIds })
+      .orderBy('statement.billingPeriodEnd', 'DESC')
+      .getMany();
+    return new Map(statements.map((statement) => [statement.creditCardId, statement]));
+  }
+
+  private async getReferencesMap(): Promise<Map<string, string>> {
+    const references = await this.txHost.tx.getRepository(CreditCardStatementReference).find();
+    const referencesMap = new Map<string, string>();
+
+    for (const reference of references) {
+      referencesMap.set(reference.id, reference.name);
+    }
+
+    return referencesMap;
+  }
+
+  private async buildTransactionsMap(
+    card: PaymentMethod,
+    statement: CreditCardStatement | undefined,
+    expensesByStatementMap: Map<string, Expense[]>,
+    unbilledExpensesByStatementMap: Map<string, Expense[]>,
+    referencesMap: Map<string, string>,
+  ): Promise<Map<string, Map<string, TransactionCategory> | null>> {
+    const unbilledMap = new Map<string, TransactionCategory>();
+    this.processUnbilledExpenses(unbilledExpensesByStatementMap.get(card.id), card, unbilledMap);
+
+    const transactionsMap = new Map<string, Map<string, TransactionCategory> | null>();
+    transactionsMap.set('unbilled', unbilledMap);
+
+    if (statement) {
+      const billedMap = new Map<string, TransactionCategory>();
+      this.processStatementExpenses(
+        expensesByStatementMap.get(statement.id),
+        card,
+        statement,
+        referencesMap,
+        billedMap,
+      );
+      transactionsMap.set('billed', billedMap);
+    }
+
+    return transactionsMap;
+  }
+
+  private processStatementExpenses(
+    expenses: Expense[] | undefined,
+    card: PaymentMethod,
+    statement: CreditCardStatement | undefined,
+    referencesMap: Map<string, string>,
+    transactionsMap: Map<string, TransactionCategory>,
+  ): void {
+    if (!expenses) return;
+
+    for (const expense of expenses) {
+      const transaction = this.createTransaction(expense, card, referencesMap);
+      this.addTransactionToCategory(
+        transactionsMap,
+        transaction,
+        new Decimal(statement?.totalOperations ?? 0),
+        expense.monthlyAmount,
+      );
+    }
+  }
+
+  private processUnbilledExpenses(
+    expenses: Expense[] | undefined,
+    card: PaymentMethod,
+    transactionsMap: Map<string, TransactionCategory>,
+  ): void {
+    if (!expenses) return;
+
+    for (const expense of expenses) {
+      const transaction = this.createTransaction(expense, card, null, CreditCardStatementReferencesEnum.TRANSACTION);
+      this.addTransactionToCategory(transactionsMap, transaction, new Decimal(0), expense.monthlyAmount);
+    }
+  }
+
+  private createTransaction(
+    expense: Expense,
+    card: PaymentMethod,
+    referencesMap: Map<string, string> | null,
+    defaultReference?: string,
+  ): Transaction {
+    return {
+      date: expense.date.toISOString(),
+      referenceCode: expense.referenceCode ?? '',
+      description: expense.description,
+      operationAmount: new Decimal(expense.operationAmount),
+      totalAmount: new Decimal(expense.totalAmount),
+      currentInstallment: expense.currentInstallment,
+      totalInstallments: expense.totalInstallments,
+      monthlyAmount: new Decimal(expense.monthlyAmount),
+      reference: defaultReference ?? referencesMap?.get(expense.creditCardStatementReferenceId ?? '') ?? 'N/A',
+      creditCard: card.name,
+      location: expense.location ?? 'N/A',
+    };
+  }
+
+  private createBilledCardDebt(
+    card: PaymentMethod,
+    statement: CreditCardStatement | undefined,
+    transactionsMap: Map<string, TransactionCategory>,
+  ) {
+    return {
+      creditCard: card.name,
+      billedStatements: {
+        total: new Decimal(statement?.dueAmount ?? 0),
+        billingPeriodStart: statement?.billingPeriodStart.toLocaleDateString('es-CL') ?? '',
+        billingPeriodEnd: statement?.billingPeriodEnd.toLocaleDateString('es-CL') ?? '',
+        transactions: Array.from(transactionsMap.values()),
+      },
+      unbilledStatements: null,
+    };
+  }
+
+  private async createUnbilledCardDebt(
+    card: PaymentMethod,
+    transactionsMap: Map<string, TransactionCategory>,
+  ): Promise<CreditCardsDebt['creditCards'][0]> {
+    const lastStatementDate = await this.getLatestCreditCardStatementDateByCreditCard(card.id);
+    const unbilledPeriodStart = this.calculateUnbilledPeriodStart(lastStatementDate);
+
+    return {
+      creditCard: card.name,
+      billedStatements: null,
+      unbilledStatements: {
+        total: transactionsMap.get(CreditCardStatementReferencesEnum.TRANSACTION)?.calculatedTotal ?? new Decimal(0),
+        unbilledPeriodStart: unbilledPeriodStart?.toLocaleDateString('es-CL') ?? null,
+        transactions: Array.from(transactionsMap.values()),
+      },
+    };
+  }
+
+  private calculateUnbilledPeriodStart(lastStatementDate: Date | null): Date | null {
+    if (!lastStatementDate) return null;
+
+    const unbilledPeriodStart = new Date(lastStatementDate);
+    unbilledPeriodStart.setDate(unbilledPeriodStart.getDate() + 1);
+    return unbilledPeriodStart;
   }
 }
