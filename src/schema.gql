@@ -165,6 +165,13 @@ A date string, such as 2007-12-03, compliant with the `full-date` format outline
 """
 scalar Date
 
+type LogMessage {
+  level: String!
+  message: String!
+  context: String!
+  timestamp: String!
+}
+
 type TransactionCategoryDto {
   reference: String!
   calculatedTotal: Float!
@@ -251,4 +258,8 @@ input CreateIncomeInput {
 
   """Cuenta"""
   bankAccountId: ID!
+}
+
+type Subscription {
+  expenseLogs: LogMessage!
 }

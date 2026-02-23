@@ -20,6 +20,7 @@ import { ClsModule } from 'nestjs-cls';
 import { ClsPluginTransactional } from '@nestjs-cls/transactional/dist/src/lib/plugin-transactional';
 import { TransactionalAdapterTypeOrm } from '@nestjs-cls/transactional-adapter-typeorm/dist/src/lib/transactional-adapter-typeorm';
 import { CategoryModule } from '@modules/categories/category.module';
+import { SharedModule } from '@modules/shared/shared.module';
 
 @Module({
   imports: [
@@ -44,11 +45,15 @@ import { CategoryModule } from '@modules/categories/category.module';
           autoSchemaFile: join(process.cwd(), 'src/schema.gql'),
           playground: false,
           plugins: [ApolloServerPluginLandingPageLocalDefault()],
+          subscriptions: {
+            'graphql-ws': true,
+          },
         }),
       ],
       useFactory: () => getDatabaseConfig(),
       inject: [],
     }),
+    SharedModule,
     UsersModule,
     PaymentMethodsModule,
     PaymentMethodsTypesModule,

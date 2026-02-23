@@ -49,6 +49,7 @@
     "decimal.js": "^10.6.0",
     "graphql": "^16.10.0",
     "graphql-scalars": "^1.24.1",
+    "graphql-subscriptions": "^3.0.0",
     "imap": "^0.8.19",
     "mailparser": "^3.7.4",
     "pdf-lib": "^1.17.1",

@@ -1,6 +1,8 @@
 import axios from 'axios';
 import { CaptchaService } from './captcha.utils';
 import { Logger } from '@nestjs/common';
+import { PubSub } from 'graphql-subscriptions';
+import { formatInTimeZone } from 'date-fns-tz';
 
 interface LiderBCILoginResponse {
   access_token: string;
@@ -21,9 +23,20 @@ export interface LiderBCIUnbilledExpensesResponse {
   movimiento: LiderBCIUnbilledExpense[];
 }
 
-export async function getLiderUnbilledExpenses() {
+export async function getLiderUnbilledExpenses(pubSub?: PubSub) {
   const logger = new Logger('LiderBCIUtil');
-  logger.log('Starting process to get Lider BCI unbilled expenses');
+  const log = (level: 'log' | 'error', message: string) => {
+    logger[level](message);
+    pubSub?.publish('EXPENSE_LOGS', {
+      expenseLogs: {
+        level,
+        message,
+        context: 'LiderBCIUtil',
+        timestamp: formatInTimeZone(new Date(), 'America/Santiago', 'yyyy-MM-dd HH:mm:ss'),
+      },
+    });
+  };
+  log('log', 'Starting process to get Lider BCI unbilled expenses');
   if (
     !process.env.CAPTCHA_API_KEY ||
     !process.env.LIDER_BCI_URL ||
@@ -34,24 +47,24 @@ export async function getLiderUnbilledExpenses() {
   ) {
     throw new Error('LIDER BCI environment variables are not properly set');
   }
-  logger.log('Obtaining captcha token for Lider BCI');
+  log('log', 'Obtaining captcha token for Lider BCI');
   const captchaToken = await new CaptchaService(process.env.CAPTCHA_API_KEY).solveCloudflareTurnstile({
     pageurl: process.env.LIDER_BCI_URL,
     sitekey: process.env.LIDER_BCI_SITEKEY,
   });
-  logger.log('Captcha token obtained for Lider BCI');
+  log('log', 'Captcha token obtained for Lider BCI');
   const liderBCILoginResponse = await loginLiderBCI(captchaToken.data);
   if (liderBCILoginResponse instanceof Error) {
-    logger.error('Error logging into Lider BCI', liderBCILoginResponse);
+    log('error', 'Error logging into Lider BCI');
     return liderBCILoginResponse;
   }
-  logger.log('Successfully logged into Lider BCI');
+  log('log', 'Successfully logged into Lider BCI');
   const liderUnbilledExpensesData = await liderUnbilledExpenses(liderBCILoginResponse.access_token);
   if (liderUnbilledExpensesData instanceof Error) {
-    logger.error('Error fetching Lider BCI unbilled expenses', liderUnbilledExpensesData);
+    log('error', 'Error fetching Lider BCI unbilled expenses');
     return liderUnbilledExpensesData;
   }
-  logger.log('Successfully fetched Lider BCI unbilled expenses');
+  log('log', `Successfully fetched ${liderUnbilledExpensesData.movimiento.length} Lider BCI unbilled expenses`);
   return liderUnbilledExpensesData;
 }
 

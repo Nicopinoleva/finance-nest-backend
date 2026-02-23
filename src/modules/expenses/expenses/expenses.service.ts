@@ -11,7 +11,7 @@ import { Decimal } from 'decimal.js';
 import { ParsedStatement, Transaction } from '@modules/credit-card-statement/credit-card-statement.interface';
 import { Transactional, TransactionHost } from '@nestjs-cls/transactional';
 import { TransactionalAdapterTypeOrm } from '@nestjs-cls/transactional-adapter-typeorm';
-import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
+import { HttpException, HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Repository } from 'typeorm';
 import { parse, subDays } from 'date-fns';
@@ -27,6 +27,8 @@ import {
   BancoDeChileUnbilledExpenseCreditCard,
   getBancoDeChileUnbilledExpenses,
 } from '@utils/utils/banco-de-chile.utils';
+import { PubSub } from 'graphql-subscriptions';
+import { PUB_SUB } from '@modules/shared/pubsub.provider';
 
 @Injectable()
 export class ExpensesService {
@@ -39,7 +41,20 @@ export class ExpensesService {
     private readonly creditCardStatementService: CreditCardStatementService,
     private readonly paymentMethodsService: PaymentMethodsService,
     private readonly txHost: TransactionHost<TransactionalAdapterTypeOrm>,
+    @Inject(PUB_SUB) private readonly pubSub: PubSub,
   ) {}
+
+  private log(level: 'log' | 'error' | 'warn', message: string) {
+    this.logger[level](message);
+    this.pubSub.publish('EXPENSE_LOGS', {
+      expenseLogs: {
+        level,
+        message,
+        context: ExpensesService.name,
+        timestamp: formatInTimeZone(new Date(), 'America/Santiago', 'yyyy-MM-dd HH:mm:ss'),
+      },
+    });
+  }
 
   @Transactional()
   async saveParsedExpensesFromCreditCardStatement(parsedStatement: ParsedStatement) {
@@ -313,8 +328,8 @@ export class ExpensesService {
 
   @Transactional()
   async saveUnbilledExpenses() {
+    this.log('log', 'Starting process to refresh unbilled expenses');
     const expensesToSave: Expense[] = [];
-    const bancoDeChileUnbilledExpenses = await getBancoDeChileUnbilledExpenses();
     // let latestStatementDate = await this.creditCardStatementService.getLatestCreditCardStatementDateByCreditCard(
     //   'b6215c05-0ccd-41f6-b521-d1d678737a67',
     // );
@@ -327,9 +342,10 @@ export class ExpensesService {
     // const emailCreditCardPayment = await this.emailService.bancoDeChileEmailCreditCardPayment(
     //   formatInTimeZone(latestStatementDate, 'UTC', 'MM-dd-yyyy'),
     // );
-    const liderUnbilledExpenses = await getLiderUnbilledExpenses();
+    const liderUnbilledExpenses = await getLiderUnbilledExpenses(this.pubSub);
+    const bancoDeChileUnbilledExpenses = await getBancoDeChileUnbilledExpenses(this.pubSub);
     if (liderUnbilledExpenses instanceof Error) {
-      this.logger.error('Error fetching Lider BCI unbilled expenses', liderUnbilledExpenses);
+      this.log('error', 'Error fetching Lider BCI unbilled expenses');
       throw new GraphQLException(
         `Failed to fetch Lider BCI unbilled expenses: ${liderUnbilledExpenses.message}`,
         ErrorCode.INTERNAL_SERVER_ERROR,
@@ -359,23 +375,21 @@ export class ExpensesService {
       existingExpensesSet,
       currencyByAlphabeticCodeMap,
     );
-    if (!bancoDeChileUnbilledExpenses) {
-      this.logger.error('Error fetching Banco de Chile unbilled expenses', bancoDeChileUnbilledExpenses);
-      throw new GraphQLException(`Failed to fetch Banco de Chile unbilled expenses`, ErrorCode.INTERNAL_SERVER_ERROR);
+    if (bancoDeChileUnbilledExpenses) {
+      this.formatBancoDeChileUnbilledExpensesForExpenseEntity(
+        bancoDeChileUnbilledExpenses,
+        expensesToSave,
+        paymentMethodsMap,
+        existingExpensesSet,
+        currencyByNumericCodeMap,
+      );
+    } else {
+      this.log('error', 'Error fetching Banco de Chile unbilled expenses');
     }
-    this.formatBancoDeChileUnbilledExpensesForExpenseEntity(
-      bancoDeChileUnbilledExpenses,
-      expensesToSave,
-      paymentMethodsMap,
-      existingExpensesSet,
-      currencyByNumericCodeMap,
-    );
-    await this.txHost.tx.delete(Expense, {
-      where: {
-        createdById: 'c3983079-8ad2-4057-aa26-5418e1003563', // TODO: placeholder for testing
-        creditCardStatementId: IsNull(),
-      },
-    });
+    if (expensesToSave.length === 0) {
+      this.log('log', 'No new unbilled expenses to save');
+      return [];
+    }
     await this.txHost.tx.save(Expense, expensesToSave);
     return expensesToSave;
   }
@@ -448,10 +462,11 @@ export class ExpensesService {
         continue;
       }
       const formattedDate = parse(liderExpense.fecha, 'dd/MM/yyyy', new Date());
-      const expenseKey = `${formattedDate.toISOString()}|${liderExpense.descripcion}|${liderExpense.monto.toFixed(4)}`;
+      const expenseKey = `${formattedDate.toISOString()}|${liderExpense.descripcion}|${liderExpense.monto}`;
       if (existingExpensesSet.has(expenseKey)) {
         continue;
       }
+      this.logger.log(`Processing new unbilled expense: ${expenseKey}`);
       const currency = currencyByAlphabeticCodeMap.get(liderExpense.tipo);
       if (!currency) {
         this.logger.warn(
@@ -497,10 +512,14 @@ export class ExpensesService {
       }
       for (const expenseData of creditCard.listaMovNoFactur) {
         const formattedDate = parse(expenseData.fechaTransaccionString, 'dd/MM/yyyy', new Date());
-        const expenseKey = `${formattedDate.toISOString()}|${expenseData.glosaTransaccion}|${Number.parseFloat(expenseData.montoMonedaOrigen).toFixed(4)}`;
+        let expenseKey = `${formattedDate.toISOString()}|${expenseData.glosaTransaccion}|${Number.parseFloat(expenseData.montoMonedaOrigen)}`;
+        if (expenseData.origenTransaccion === 'INT') {
+          expenseKey = `${formattedDate.toISOString()}|${expenseData.glosaTransaccion}|${expenseData.montoCompra}`;
+        }
         if (existingExpensesSet.has(expenseKey)) {
           continue;
         }
+        this.logger.log(`Processing new unbilled expense: ${expenseKey}`);
         let currency = currencyByNumericCodeMap.get(expenseData.codigoMonedaOrigen);
         if (expenseData.codigoMonedaOrigen === 0) {
           currency = currencyByNumericCodeMap.get(152); // If currency code is 0, set to CLP (code 152)
@@ -536,6 +555,14 @@ export class ExpensesService {
           expenseData.numeroTotalCuotas.length > 0 ? Number.parseInt(expenseData.numeroTotalCuotas) : 1;
         expense.createdById = 'c3983079-8ad2-4057-aa26-5418e1003563'; // TODO: placeholder for testing
         expense.creditCardStatementReferenceId = referenceId;
+
+        if (expenseData.origenTransaccion === 'INT') {
+          expense.operationAmount = new Decimal(expenseData.montoCompra);
+          expense.totalAmount = new Decimal(expenseData.montoCompra);
+          expense.monthlyAmount = new Decimal(expenseData.montoCompra);
+          expense.sourceCurrencyAmount = new Decimal(expenseData.montoMonedaOrigen);
+        }
+
         expensesToSave.push(expense);
       }
     }

@@ -1,5 +1,7 @@
 import { Logger } from '@nestjs/common';
 import axios from 'axios';
+import { formatInTimeZone } from 'date-fns-tz';
+import { PubSub } from 'graphql-subscriptions';
 
 export interface BancoDeChileCreditCardsIdsResponse {
   idProducto: string;
@@ -47,9 +49,20 @@ export interface BancoDeChileUnbilledExpense {
   numeroTarjetaCompleto: string | null;
 }
 
-export async function getBancoDeChileUnbilledExpenses() {
+export async function getBancoDeChileUnbilledExpenses(pubSub?: PubSub) {
   const logger = new Logger('BancoDeChileUtil');
-  logger.log('Starting process to get Banco de Chile unbilled expenses');
+  const log = (level: 'log' | 'error', message: string) => {
+    logger[level](message);
+    pubSub?.publish('EXPENSE_LOGS', {
+      expenseLogs: {
+        level,
+        message,
+        context: 'BancoDeChileUtil',
+        timestamp: formatInTimeZone(new Date(), 'America/Santiago', 'yyyy-MM-dd HH:mm:ss'),
+      },
+    });
+  };
+  log('log', 'Starting process to get Banco de Chile unbilled expenses');
 
   if (
     !process.env.BROWSERLESS_TOKEN ||
@@ -63,32 +76,36 @@ export async function getBancoDeChileUnbilledExpenses() {
   const cookies = await fetchBancoDeChileLoginCookies();
   if (cookies instanceof Error) {
     logger.error('Error logging into Banco de Chile', cookies);
+    log('error', 'Error logging into Banco de Chile');
     return;
   }
   if (!cookies.some((cookie) => cookie.name === 'mod_auth_openidc_session')) {
     logger.error('Login to Banco de Chile was not successful, session cookie not found');
+    log('error', 'Login to Banco de Chile was not successful, session cookie not found');
     return;
   }
-  logger.log('Successfully logged into Banco de Chile, fetching credit cards ids');
+  log('log', 'Successfully logged into Banco de Chile, fetching credit cards ids');
   const creditCardsIdsResponse = await fetchBancoDeChileCreditCardsIds(cookies as { name: string; value: string }[]);
   if (creditCardsIdsResponse instanceof Error) {
     logger.error('Error fetching Banco de Chile credit cards ids', creditCardsIdsResponse);
+    log('error', 'Error fetching Banco de Chile credit cards ids');
     return;
   }
-  logger.log('Successfully fetched Banco de Chile credit cards ids');
+  log('log', 'Successfully fetched Banco de Chile credit cards ids');
 
   const unbilledExpensesResultMap = new Map<string, BancoDeChileUnbilledExpenseCreditCard>();
 
   for (const creditCard of creditCardsIdsResponse) {
-    logger.log(`Fetching unbilled expenses for credit card ${creditCard.numero}`);
+    log('log', `Fetching unbilled expenses for credit card ${creditCard.numero}`);
     const unbilledExpensesResponse = await fetchBancoDeChileUnbilledExpensesForCreditCard(
       creditCard.idProducto,
       cookies as { name: string; value: string }[],
     );
     if (unbilledExpensesResponse instanceof Error) {
       logger.error(`Error fetching unbilled expenses for credit card ${creditCard.numero}`, unbilledExpensesResponse);
+      log('error', `Error fetching unbilled expenses for credit card ${creditCard.numero}`);
+
     } else {
-      logger.log(`Successfully fetched unbilled expenses for credit card ${creditCard.numero}`);
       unbilledExpensesResultMap.set(creditCard.numero, unbilledExpensesResponse);
     }
   }
