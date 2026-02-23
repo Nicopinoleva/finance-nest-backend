@@ -88,6 +88,14 @@ type PaymentMethod {
   updatedBy: Users
 }
 
+type Currency {
+  id: ID!
+  numericCode: Float!
+  alphabeticCode: String!
+  name: String!
+  minorUnit: Float
+}
+
 type Category {
   id: ID!
   name: String!
@@ -107,6 +115,7 @@ type CreditCardStatementReference {
 type Expense {
   id: ID!
   description: String!
+  location: String
   operationAmount: Float!
   totalAmount: Float!
   monthlyAmount: Float!
@@ -114,13 +123,13 @@ type Expense {
   currentInstallment: Int!
   totalInstallments: Int!
   date: DateTime!
-  currency: String!
   referenceCode: String
   installmentsFulfilled: Boolean!
   paymentMethod: PaymentMethod!
   creditCardStatement: CreditCardStatement
   parentInstallment: Expense
-  creditCardStatementReference: CreditCardStatementReference
+  creditCardStatementReference: CreditCardStatementReference!
+  currency: Currency!
   category: Category
   createdAt: DateTime!
   updatedAt: DateTime!
@@ -156,8 +165,55 @@ A date string, such as 2007-12-03, compliant with the `full-date` format outline
 """
 scalar Date
 
+type TransactionCategoryDto {
+  reference: String!
+  calculatedTotal: Float!
+  parsedTotal: Float!
+  transactions: [TransactionDto!]!
+}
+
+type TransactionDto {
+  date: String!
+  referenceCode: String!
+  description: String!
+  operationAmount: Float!
+  totalAmount: Float!
+  currentInstallment: Int!
+  totalInstallments: Int!
+  monthlyAmount: Float!
+  reference: String!
+  creditCard: String!
+  location: String!
+}
+
+type BilledStatementsDto {
+  total: Float!
+  billingPeriodStart: String!
+  billingPeriodEnd: String!
+  transactions: [TransactionCategoryDto!]!
+}
+
+type UnbilledStatementsDto {
+  total: Float!
+  unbilledPeriodStart: String
+  transactions: [TransactionCategoryDto!]!
+}
+
+type CreditCardDebtDto {
+  creditCard: String!
+  billedStatements: BilledStatementsDto
+  unbilledStatements: UnbilledStatementsDto
+}
+
+type CreditCardsDebtDto {
+  creditCards: [CreditCardDebtDto!]!
+  totalDebt: Float!
+  month: String!
+}
+
 type Query {
   sayHello: String!
+  getCreditCardsDebt: CreditCardsDebtDto!
 }
 
 type Mutation {

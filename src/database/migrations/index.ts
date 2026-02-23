@@ -15,6 +15,8 @@ import { ExpenseCurrency1768223803625 } from './1768223803625-expense-currency';
 import { ExpenseCurrencyDropDefault1768224045017 } from './1768224045017-expense-currency-drop-default';
 import { ExpenseAmountsFloats1768225128101 } from './1768225128101-expense-amounts-floats';
 import { AddBankParseConfig1768850710605 } from './1768850710605-add-bank-parse-config';
+import { ExpenseAddLocation1768966461366 } from './1768966461366-expense-add-location';
+import { AddCurrency1771802813989 } from './1771802813989-add-currency';
 
 export const migrations = [
   InitDatabase1756317501748,
@@ -34,4 +36,6 @@ export const migrations = [
   ExpenseCurrencyDropDefault1768224045017,
   ExpenseAmountsFloats1768225128101,
   AddBankParseConfig1768850710605,
+  ExpenseAddLocation1768966461366,
+  AddCurrency1771802813989,
 ];

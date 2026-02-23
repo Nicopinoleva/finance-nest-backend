@@ -5,22 +5,28 @@ import {
   Expense,
   Category,
   PaymentMethod,
+  Currency,
 } from '@entities';
+import { Decimal } from 'decimal.js';
 import { ParsedStatement, Transaction } from '@modules/credit-card-statement/credit-card-statement.interface';
 import { Transactional, TransactionHost } from '@nestjs-cls/transactional';
 import { TransactionalAdapterTypeOrm } from '@nestjs-cls/transactional-adapter-typeorm';
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, Repository } from 'typeorm';
+import { In, IsNull, Not, Repository } from 'typeorm';
 import { parse, subDays } from 'date-fns';
 import { formatInTimeZone } from 'date-fns-tz';
 import { EmailService, EmailTransaction } from '@modules/email/email.service';
 import { CreditCardStatementService } from '@modules/credit-card-statement/credit-card-statement.service';
 import { PaymentMethodsService } from '@modules/payment-methods/payment-methods/payment-methods.service';
-import { getLiderUnbilledExpenses, LiderBCIUnbilledExpensesResponse } from '@utils';
+import { CreditCardStatementReferencesEnum, getLiderUnbilledExpenses, LiderBCIUnbilledExpensesResponse } from '@utils';
 import { ErrorCode } from '@utils/constants/error-code.enum';
 import { GraphQLException } from '@utils/exceptions/graphql.exception';
 import { parseFlexibleDate } from '@utils/utils/date.utils';
+import {
+  BancoDeChileUnbilledExpenseCreditCard,
+  getBancoDeChileUnbilledExpenses,
+} from '@utils/utils/banco-de-chile.utils';
 
 @Injectable()
 export class ExpensesService {
@@ -205,11 +211,13 @@ export class ExpensesService {
     expense.paymentMethod = mainCreditCard;
     // TODO: placeholder for testing
     expense.category = categoriesMap['GASTOS'] ?? null;
-    expense.creditCardStatementReferenceId = transaction.reference ? referencesMap[transaction.reference]?.id : null;
+    expense.creditCardStatementReferenceId = referencesMap[transaction.reference]?.id ?? null;
     expense.creditCardStatementId = parsedStatement.creditCardStatementId;
     expense.parentInstallmentId = parentInstallmentId;
     expense.createdById = 'c3983079-8ad2-4057-aa26-5418e1003563';
-    expense.currency = 'CLP';
+    // TODO: set sourceCurrencyAmount when we have transactions in foreign currency
+    expense.currencyId = '34da817c-5ebe-4d1c-a584-292d1c8f466d';
+    expense.location = transaction.location;
     return expense;
   }
 
@@ -306,16 +314,19 @@ export class ExpensesService {
   @Transactional()
   async saveUnbilledExpenses() {
     const expensesToSave: Expense[] = [];
-    let latestStatementDate = await this.creditCardStatementService.getLatestCreditCardStatementDate();
-    if (!latestStatementDate) {
-      latestStatementDate = new Date(); // If no statements exist, set to epoch
-    }
-    const emailExpenses = await this.emailService.bancoDeChileEmailExpenses(
-      formatInTimeZone(latestStatementDate, 'UTC', 'MM-dd-yyyy'),
-    );
-    const emailCreditCardPayment = await this.emailService.bancoDeChileEmailCreditCardPayment(
-      formatInTimeZone(latestStatementDate, 'UTC', 'MM-dd-yyyy'),
-    );
+    const bancoDeChileUnbilledExpenses = await getBancoDeChileUnbilledExpenses();
+    // let latestStatementDate = await this.creditCardStatementService.getLatestCreditCardStatementDateByCreditCard(
+    //   'b6215c05-0ccd-41f6-b521-d1d678737a67',
+    // );
+    // if (!latestStatementDate) {
+    //   latestStatementDate = new Date(); // If no statements exist, set to epoch
+    // }
+    // const emailExpenses = await this.emailService.bancoDeChileEmailExpenses(
+    //   formatInTimeZone(latestStatementDate, 'UTC', 'MM-dd-yyyy'),
+    // );
+    // const emailCreditCardPayment = await this.emailService.bancoDeChileEmailCreditCardPayment(
+    //   formatInTimeZone(latestStatementDate, 'UTC', 'MM-dd-yyyy'),
+    // );
     const liderUnbilledExpenses = await getLiderUnbilledExpenses();
     if (liderUnbilledExpenses instanceof Error) {
       this.logger.error('Error fetching Lider BCI unbilled expenses', liderUnbilledExpenses);
@@ -328,18 +339,43 @@ export class ExpensesService {
       'c3983079-8ad2-4057-aa26-5418e1003563',
     ); // TODO: placeholder for testing
     const existingExpensesSet = await this.existingUnbilledExpensesSet();
-    this.formatMailTransactionsForExpenseEntity(
-      [...emailExpenses, ...emailCreditCardPayment],
-      expensesToSave,
-      existingExpensesSet,
-      paymentMethodsMap,
-    );
+    // this.formatMailTransactionsForExpenseEntity(
+    //   [...emailExpenses, ...emailCreditCardPayment],
+    //   expensesToSave,
+    //   existingExpensesSet,
+    //   paymentMethodsMap,
+    // );
+    const currencies = await this.txHost.tx.find(Currency);
+    const currencyByAlphabeticCodeMap = new Map<string, Currency>();
+    const currencyByNumericCodeMap = new Map<number, Currency>();
+    for (const currency of currencies) {
+      currencyByAlphabeticCodeMap.set(currency.alphabeticCode, currency);
+      currencyByNumericCodeMap.set(currency.numericCode, currency);
+    }
     this.formatLiderUnbilledExpensesForExpenseEntity(
       liderUnbilledExpenses,
       expensesToSave,
       paymentMethodsMap,
       existingExpensesSet,
+      currencyByAlphabeticCodeMap,
     );
+    if (!bancoDeChileUnbilledExpenses) {
+      this.logger.error('Error fetching Banco de Chile unbilled expenses', bancoDeChileUnbilledExpenses);
+      throw new GraphQLException(`Failed to fetch Banco de Chile unbilled expenses`, ErrorCode.INTERNAL_SERVER_ERROR);
+    }
+    this.formatBancoDeChileUnbilledExpensesForExpenseEntity(
+      bancoDeChileUnbilledExpenses,
+      expensesToSave,
+      paymentMethodsMap,
+      existingExpensesSet,
+      currencyByNumericCodeMap,
+    );
+    await this.txHost.tx.delete(Expense, {
+      where: {
+        createdById: 'c3983079-8ad2-4057-aa26-5418e1003563', // TODO: placeholder for testing
+        creditCardStatementId: IsNull(),
+      },
+    });
     await this.txHost.tx.save(Expense, expensesToSave);
     return expensesToSave;
   }
@@ -384,14 +420,14 @@ export class ExpensesService {
       const expense = new Expense();
       expense.date = emailExpense.date;
       expense.description = emailExpense.description;
-      expense.operationAmount = amountFloat;
-      expense.totalAmount = amountFloat;
-      expense.monthlyAmount = amountFloat;
+      expense.operationAmount = new Decimal(amountFloat);
+      expense.totalAmount = new Decimal(amountFloat);
+      expense.monthlyAmount = new Decimal(amountFloat);
       expense.currentInstallment = 1;
       expense.totalInstallments = 1;
       expense.paymentMethod = paymentMethod;
       expense.createdById = 'c3983079-8ad2-4057-aa26-5418e1003563'; // TODO: placeholder for testing
-      expense.currency = emailExpense.currency;
+      // expense.currency = emailExpense.currency;
       expensesToSave.push(expense);
     }
   }
@@ -401,6 +437,7 @@ export class ExpensesService {
     expensesToSave: Expense[],
     paymentMethodsMap: Map<string, PaymentMethod>,
     existingExpensesSet: Set<string>,
+    currencyByAlphabeticCodeMap: Map<string, Currency>,
   ) {
     for (const liderExpense of liderUnbilledExpenses.movimiento) {
       const paymentMethod = paymentMethodsMap.get('9023'); // TODO: placeholder for testing
@@ -415,18 +452,144 @@ export class ExpensesService {
       if (existingExpensesSet.has(expenseKey)) {
         continue;
       }
+      const currency = currencyByAlphabeticCodeMap.get(liderExpense.tipo);
+      if (!currency) {
+        this.logger.warn(
+          `Currency with alphabetic code ${liderExpense.tipo} not found for unbilled expense: ${liderExpense.descripcion}, skipping...`,
+        );
+        continue;
+      }
+
+      let referenceId = 'd3e608da-e6b8-49b5-921f-f19aac2b1a81';
+
+      if (liderExpense.descripcion === 'PAGO') {
+        referenceId = 'a68cde82-fd40-47a5-a5a9-e7fc8a00c409';
+      }
+
       const expense = new Expense();
       expense.description = liderExpense.descripcion;
       expense.date = formattedDate;
-      expense.operationAmount = liderExpense.monto;
-      expense.totalAmount = liderExpense.monto;
-      expense.monthlyAmount = liderExpense.monto;
-      expense.currency = liderExpense.tipo;
+      expense.operationAmount = new Decimal(liderExpense.monto);
+      expense.totalAmount = new Decimal(liderExpense.monto);
+      expense.monthlyAmount = new Decimal(liderExpense.monto);
+      expense.currency = currency;
       expense.paymentMethod = paymentMethod;
       expense.currentInstallment = 1;
       expense.totalInstallments = liderExpense.cuota.length > 0 ? Number.parseInt(liderExpense.cuota.split('/')[1]) : 1;
       expense.createdById = 'c3983079-8ad2-4057-aa26-5418e1003563'; // TODO: placeholder for testing
+      expense.creditCardStatementReferenceId = referenceId;
       expensesToSave.push(expense);
     }
+  }
+
+  async formatBancoDeChileUnbilledExpensesForExpenseEntity(
+    bancoDeChileUnbilledExpenses: Map<string, BancoDeChileUnbilledExpenseCreditCard>,
+    expensesToSave: Expense[],
+    paymentMethodsMap: Map<string, PaymentMethod>,
+    existingExpensesSet: Set<string>,
+    currencyByNumericCodeMap: Map<number, Currency>,
+  ) {
+    for (const [creditCardNumber, creditCard] of bancoDeChileUnbilledExpenses.entries()) {
+      const paymentMethod = paymentMethodsMap.get(creditCardNumber.slice(-4)); // TODO: placeholder for testing
+      if (!paymentMethod) {
+        this.logger.warn(`Payment method with number ${creditCardNumber.slice(-4)} not found, skipping...`);
+        continue;
+      }
+      for (const expenseData of creditCard.listaMovNoFactur) {
+        const formattedDate = parse(expenseData.fechaTransaccionString, 'dd/MM/yyyy', new Date());
+        const expenseKey = `${formattedDate.toISOString()}|${expenseData.glosaTransaccion}|${Number.parseFloat(expenseData.montoMonedaOrigen).toFixed(4)}`;
+        if (existingExpensesSet.has(expenseKey)) {
+          continue;
+        }
+        let currency = currencyByNumericCodeMap.get(expenseData.codigoMonedaOrigen);
+        if (expenseData.codigoMonedaOrigen === 0) {
+          currency = currencyByNumericCodeMap.get(152); // If currency code is 0, set to CLP (code 152)
+        }
+        if (!currency) {
+          this.logger.warn(
+            `Currency with numeric code ${expenseData.codigoMonedaOrigen} not found for unbilled expense: ${expenseData.glosaTransaccion}, skipping...`,
+          );
+          continue;
+        }
+
+        let monthlyAmount = new Decimal(Number.parseFloat(expenseData.montoMonedaOrigen));
+        if (expenseData.numeroTotalCuotas.length > 0 && expenseData.numeroTotalCuotas !== '0') {
+          const totalInstallments = Number.parseInt(expenseData.numeroTotalCuotas);
+          monthlyAmount = monthlyAmount.dividedBy(totalInstallments);
+        }
+
+        const referenceId =
+          expenseData.rubroComercio === '0'
+            ? 'a68cde82-fd40-47a5-a5a9-e7fc8a00c409'
+            : 'd3e608da-e6b8-49b5-921f-f19aac2b1a81';
+
+        const expense = new Expense();
+        expense.description = expenseData.glosaTransaccion;
+        expense.date = formattedDate;
+        expense.operationAmount = new Decimal(Number.parseFloat(expenseData.montoMonedaOrigen));
+        expense.totalAmount = new Decimal(Number.parseFloat(expenseData.montoMonedaOrigen));
+        expense.monthlyAmount = monthlyAmount;
+        expense.currency = currency;
+        expense.paymentMethod = paymentMethod;
+        expense.currentInstallment = 1;
+        expense.totalInstallments =
+          expenseData.numeroTotalCuotas.length > 0 ? Number.parseInt(expenseData.numeroTotalCuotas) : 1;
+        expense.createdById = 'c3983079-8ad2-4057-aa26-5418e1003563'; // TODO: placeholder for testing
+        expense.creditCardStatementReferenceId = referenceId;
+        expensesToSave.push(expense);
+      }
+    }
+  }
+
+  async getExpensesMapByCreditCardStatementIds(creditCardStatementsId: string[]): Promise<Map<string, Expense[]>> {
+    const expenses = await this.txHost.tx.find(Expense, {
+      where: {
+        creditCardStatementId: In(creditCardStatementsId),
+      },
+      order: {
+        date: 'DESC',
+      },
+    });
+    return expenses.reduce<Map<string, Expense[]>>((map, expense) => {
+      if (!map.has(expense.creditCardStatementId!)) {
+        map.set(expense.creditCardStatementId!, []);
+      }
+      map.get(expense.creditCardStatementId!)?.push(expense);
+      return map;
+    }, new Map<string, Expense[]>());
+  }
+
+  async getUnbilledExpensesMapByCreditCardIds(creditCardIds: string[]): Promise<Map<string, Expense[]>> {
+    const clp = await this.txHost.tx.findOneOrFail(Currency, {
+      select: {
+        id: true,
+      },
+      where: {
+        alphabeticCode: 'CLP',
+      },
+    });
+    const paymentReference = await this.txHost.tx.findOneOrFail(CreditCardStatementReference, {
+      where: {
+        name: CreditCardStatementReferencesEnum.PAYMENT,
+      },
+    });
+    const expenses = await this.txHost.tx.find(Expense, {
+      where: {
+        paymentMethodId: In(creditCardIds),
+        creditCardStatementId: IsNull(),
+        currencyId: clp.id,
+        creditCardStatementReferenceId: Not(paymentReference.id),
+      },
+      order: {
+        date: 'DESC',
+      },
+    });
+    return expenses.reduce<Map<string, Expense[]>>((map, expense) => {
+      if (!map.has(expense.paymentMethodId)) {
+        map.set(expense.paymentMethodId, []);
+      }
+      map.get(expense.paymentMethodId)?.push(expense);
+      return map;
+    }, new Map<string, Expense[]>());
   }
 }

@@ -4,6 +4,7 @@ import { GraphQLDate, GraphQLDateTime } from 'graphql-scalars';
 import { Column, CreateDateColumn, Entity, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 import { BankAccount } from '../banks/bank-account.entity';
 import { Category } from '../categories/category.entity';
+import { dateTransformer } from '../../../utils/utils/transformers.utils';
 
 @Entity()
 @ObjectType()
@@ -24,7 +25,7 @@ export class Income {
   @Field(() => Int)
   amount: number;
 
-  @CreateDateColumn({ type: 'date' })
+  @CreateDateColumn({ type: 'date', transformer: dateTransformer })
   @Field(() => GraphQLDate)
   date: Date;
 

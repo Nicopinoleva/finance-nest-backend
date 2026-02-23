@@ -2,6 +2,7 @@ import { BankAccountType } from './banks/bank-account-type.entity';
 import { BankAccount } from './banks/bank-account.entity';
 import { BankParseConfiguration } from './banks/bank-parse-configuration.entity';
 import { Banks } from './banks/banks.entity';
+import { Currency } from './banks/currency.entity';
 import { Category } from './categories/category.entity';
 import { CreditCardAccount } from './credit-card-statement/credit-card-account.entity';
 import { CreditCardStatementReference } from './credit-card-statement/credit-card-statement-reference.entity';
@@ -26,6 +27,7 @@ export const entities = [
   CreditCardAccount,
   Category,
   BankParseConfiguration,
+  Currency,
 ];
 
 export {
@@ -42,4 +44,5 @@ export {
   CreditCardAccount,
   Category,
   BankParseConfiguration,
+  Currency,
 };

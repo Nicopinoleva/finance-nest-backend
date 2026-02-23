@@ -1,6 +1,7 @@
 import { PaymentMethod } from '@entities/payment-methods/payment-method.entity';
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { PaymentMethodTypesEnum } from '@utils';
 import { Repository } from 'typeorm';
 
 @Injectable()
@@ -21,5 +22,17 @@ export class PaymentMethodsService {
       map.set(paymentMethod.name, paymentMethod);
       return map;
     }, new Map());
+  }
+
+  async getActiveCreditCards(userId: string): Promise<PaymentMethod[]> {
+    return await this.paymentMethodRepository.find({
+      where: {
+        isActive: true,
+        paymentMethodType: {
+          name: PaymentMethodTypesEnum.CreditCard,
+        },
+        createdById: userId,
+      },
+    });
   }
 }

@@ -6,6 +6,9 @@ import { PaymentMethod } from '../payment-methods/payment-method.entity';
 import { Category } from '../categories/category.entity';
 import { CreditCardStatementReference } from '../credit-card-statement/credit-card-statement-reference.entity';
 import { CreditCardStatement } from '../credit-card-statement/credit-card-statement.entity';
+import { Currency } from '../banks/currency.entity';
+import { Decimal } from 'decimal.js';
+import { DecimalTransformer } from '@utils/utils/transformers.utils';
 
 @Entity()
 @ObjectType()
@@ -18,21 +21,25 @@ export class Expense {
   @Field(() => String)
   description: string;
 
-  @Column({ type: 'decimal', precision: 15, scale: 4 })
-  @Field(() => Float)
-  operationAmount: number;
+  @Column('varchar', { nullable: true })
+  @Field(() => String, { nullable: true })
+  location: string | null;
 
-  @Column({ type: 'decimal', precision: 15, scale: 4 })
+  @Column({ type: 'decimal', precision: 15, scale: 4, transformer: DecimalTransformer })
   @Field(() => Float)
-  totalAmount: number;
+  operationAmount: Decimal;
 
-  @Column({ type: 'decimal', precision: 15, scale: 4 })
+  @Column({ type: 'decimal', precision: 15, scale: 4, transformer: DecimalTransformer })
   @Field(() => Float)
-  monthlyAmount: number;
+  totalAmount: Decimal;
 
-  @Column({ type: 'decimal', precision: 15, scale: 4, nullable: true })
+  @Column({ type: 'decimal', precision: 15, scale: 4, transformer: DecimalTransformer })
+  @Field(() => Float)
+  monthlyAmount: Decimal;
+
+  @Column({ type: 'decimal', precision: 15, scale: 4, nullable: true, transformer: DecimalTransformer })
   @Field(() => Float, { nullable: true })
-  sourceCurrencyAmount: number | null;
+  sourceCurrencyAmount: Decimal | null;
 
   @Column({ type: 'integer' })
   @Field(() => Int)
@@ -45,10 +52,6 @@ export class Expense {
   @Column({ type: 'timestamp with time zone', precision: 3 })
   @Field(() => GraphQLDateTime)
   date: Date;
-
-  @Column('varchar')
-  @Field(() => String)
-  currency: string;
 
   @Column('varchar', { nullable: true })
   @Field(() => String, { nullable: true })
@@ -70,9 +73,13 @@ export class Expense {
   @Field(() => Expense, { nullable: true })
   parentInstallment: Expense | null;
 
-  @ManyToOne(() => CreditCardStatementReference, { nullable: true })
-  @Field(() => CreditCardStatementReference, { nullable: true })
-  creditCardStatementReference: CreditCardStatementReference | null;
+  @ManyToOne(() => CreditCardStatementReference)
+  @Field(() => CreditCardStatementReference)
+  creditCardStatementReference: CreditCardStatementReference;
+
+  @ManyToOne(() => Currency)
+  @Field(() => Currency)
+  currency: Currency;
 
   @ManyToOne(() => Category, { nullable: true })
   @Field(() => Category, { nullable: true })
@@ -89,6 +96,9 @@ export class Expense {
   @Column({ type: 'uuid' })
   paymentMethodId: string;
 
+  @Column({ type: 'uuid' })
+  currencyId: string;
+
   @Column({ type: 'uuid', nullable: true })
   creditCardStatementId: string | null;
 
@@ -98,8 +108,8 @@ export class Expense {
   @Column({ type: 'uuid', nullable: true })
   categoryId: string | null;
 
-  @Column({ type: 'uuid', nullable: true })
-  creditCardStatementReferenceId: string | null;
+  @Column({ type: 'uuid' })
+  creditCardStatementReferenceId: string;
 
   @ManyToOne(() => Users)
   @Field(() => Users)

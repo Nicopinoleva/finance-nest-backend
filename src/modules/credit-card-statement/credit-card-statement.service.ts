@@ -1,8 +1,9 @@
-import { forwardRef, HttpException, HttpStatus, Inject, Injectable, Scope } from '@nestjs/common';
+import { forwardRef, HttpException, HttpStatus, Inject, Injectable } from '@nestjs/common';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import {
+  CreditCardsDebt,
   CreditCardStatementCoordinates,
   CutRegion,
   ParsedStatement,
@@ -31,7 +32,8 @@ import {
   parseAmount,
   PaymentMethodTypesEnum,
 } from '@utils';
-import { BankParseConfiguration, PaymentMethod } from '@entities';
+import { BankParseConfiguration, CreditCardStatementReference, Expense, PaymentMethod } from '@entities';
+import Decimal from 'decimal.js';
 
 interface TotalMatch {
   amount: string;
@@ -40,7 +42,7 @@ interface TotalMatch {
   category?: string;
 }
 
-@Injectable({ scope: Scope.REQUEST })
+@Injectable()
 export class CreditCardStatementService {
   private creditCardStatementPDF: PDFDocument;
   private bankToParse: CreditCardStatementBanks;
@@ -77,10 +79,11 @@ export class CreditCardStatementService {
   constructor(
     @InjectRepository(CreditCardStatement)
     private readonly creditCardStatementRepository: Repository<CreditCardStatement>,
+    @Inject(forwardRef(() => PaymentMethodsService))
     private readonly paymentMethodService: PaymentMethodsService,
+    private readonly txHost: TransactionHost<TransactionalAdapterTypeOrm>,
     @Inject(forwardRef(() => ExpensesService))
     private readonly expensesService: ExpensesService,
-    private readonly txHost: TransactionHost<TransactionalAdapterTypeOrm>,
   ) {}
 
   async parseCreditCardStatement(
@@ -705,11 +708,11 @@ export class CreditCardStatementService {
         date: date,
         referenceCode: code,
         description: description.trim(),
-        operationAmount: parsedOperationAmount,
-        totalAmount: parsedTotalAmount,
+        operationAmount: new Decimal(parsedOperationAmount),
+        totalAmount: new Decimal(parsedTotalAmount),
         currentInstallment: parsedCurrentInstallment,
         totalInstallments: parsedTotalInstallments,
-        monthlyAmount: parsedMonthlyAmount,
+        monthlyAmount: new Decimal(parsedMonthlyAmount),
         reference: '',
         creditCard: '',
       };
@@ -720,16 +723,16 @@ export class CreditCardStatementService {
         this.addTransactionToCategory(
           transactionsMap,
           { ...transaction, reference: CreditCardStatementReferencesEnum.PAYMENT },
-          totalPayments,
-          parsedMonthlyAmount,
+          new Decimal(totalPayments),
+          new Decimal(parsedMonthlyAmount),
         );
       } else if (totalPATMatch && totalPATMatch.index > transactionIndex) {
         totalPAT += parsedMonthlyAmount;
         this.addTransactionToCategory(
           transactionsMap,
           { ...transaction, reference: CreditCardStatementReferencesEnum.PAT },
-          totalPAT,
-          parsedMonthlyAmount,
+          new Decimal(totalPAT),
+          new Decimal(parsedMonthlyAmount),
         );
       } else if (
         creditCardsMatches.some((card) => {
@@ -737,8 +740,8 @@ export class CreditCardStatementService {
             this.addTransactionToCategory(
               transactionsMap,
               { ...transaction, creditCard: card.number, reference: CreditCardStatementReferencesEnum.TRANSACTION },
-              card.parsedTotal,
-              parsedMonthlyAmount,
+              new Decimal(card.parsedTotal),
+              new Decimal(parsedMonthlyAmount),
             );
             return true;
           }
@@ -750,8 +753,8 @@ export class CreditCardStatementService {
         this.addTransactionToCategory(
           transactionsMap,
           { ...transaction, reference: CreditCardStatementReferencesEnum.INSTALLMENT },
-          totalInstallments,
-          parsedMonthlyAmount,
+          new Decimal(totalInstallments),
+          new Decimal(parsedMonthlyAmount),
         );
       }
       // In banco de chile, unbilled staments table does not always appear
@@ -761,8 +764,8 @@ export class CreditCardStatementService {
           this.addTransactionToCategory(
             transactionsMap,
             { ...transaction, reference: CreditCardStatementReferencesEnum.CHARGE },
-            totalCharges,
-            parsedMonthlyAmount,
+            new Decimal(totalCharges),
+            new Decimal(parsedMonthlyAmount),
           );
         } else if (totalUnbilledInstallmentsMatch.index < transactionIndex) {
           // For some reason, unbilled statements total uses operation amount instead of monthly amount
@@ -770,8 +773,8 @@ export class CreditCardStatementService {
           this.addTransactionToCategory(
             transactionsMap,
             { ...transaction, reference: CreditCardStatementReferencesEnum.UNBILLED_INSTALLMENT },
-            totalUnbilledInstallments,
-            parsedMonthlyAmount,
+            new Decimal(totalUnbilledInstallments),
+            new Decimal(parsedMonthlyAmount),
           );
         }
       } else if (totalChargesTableStartMatch && totalChargesTableStartMatch.index < transactionIndex) {
@@ -780,8 +783,8 @@ export class CreditCardStatementService {
         this.addTransactionToCategory(
           transactionsMap,
           { ...transaction, reference: CreditCardStatementReferencesEnum.CHARGE },
-          totalCharges,
-          parsedMonthlyAmount,
+          new Decimal(totalCharges),
+          new Decimal(parsedMonthlyAmount),
         );
       }
     }
@@ -946,6 +949,7 @@ export class CreditCardStatementService {
       totalOtrosComerciosMain,
       totalOtrosComerciosAdditional,
       totalCargosComisiones,
+      totalCargosComisionesAdditional,
       totalPago,
       totalInstallments,
     } = this.categorizeLiderBciTransactions(
@@ -989,6 +993,13 @@ export class CreditCardStatementService {
     if (cargosParsedTotals[0] && cargosParsedTotals[0].parsedAmount !== totalCargosComisiones) {
       throw new HttpException(
         `Total de CARGOS Y COMISIONES no coincide: ${cargosParsedTotals[0].parsedAmount} !== ${totalCargosComisiones}`,
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    if (cargosParsedTotals[1] && cargosParsedTotals[1].parsedAmount !== totalCargosComisionesAdditional) {
+      throw new HttpException(
+        `Total de CARGOS Y COMISIONES (2) no coincide: ${cargosParsedTotals[1].parsedAmount} !== ${totalCargosComisionesAdditional}`,
         HttpStatus.UNPROCESSABLE_ENTITY,
       );
     }
@@ -1056,6 +1067,7 @@ export class CreditCardStatementService {
     let totalOtrosComerciosMain = 0;
     let totalOtrosComerciosAdditional = 0;
     let totalCargosComisiones = 0;
+    let totalCargosComisionesAdditional = 0;
     let totalInstallments = 0;
     let totalPago = 0;
 
@@ -1091,11 +1103,11 @@ export class CreditCardStatementService {
         location: location || 'N/A',
         date: date,
         description: description.trim(),
-        operationAmount: parsedOperationAmount,
-        totalAmount: parsedTotalAmount,
+        operationAmount: new Decimal(parsedOperationAmount),
+        totalAmount: new Decimal(parsedTotalAmount),
         currentInstallment: parsedCurrentInstallment,
         totalInstallments: parsedTotalInstallments,
-        monthlyAmount: parsedMonthlyAmount,
+        monthlyAmount: new Decimal(parsedMonthlyAmount),
         reference: '',
         referenceCode: '',
         creditCard: isAdditionalCard ? 'ADDITIONAL' : 'MAIN',
@@ -1161,13 +1173,17 @@ export class CreditCardStatementService {
         transactionIndex >= cargosComisionesMatch.index &&
         transactionIndex < pagoMatch!.index - 20
       ) {
-        totalCargosComisiones += parsedMonthlyAmount;
+        if (isAdditionalCard) {
+          totalCargosComisionesAdditional += parsedMonthlyAmount;
+        } else {
+          totalCargosComisiones += parsedMonthlyAmount;
+        }
 
         this.addTransactionToCategory(
           transactionsMap,
           { ...transaction, reference: CreditCardStatementReferencesEnum.CHARGE },
-          cargosParsedTotals[0]?.parsedAmount || 0,
-          parsedMonthlyAmount,
+          new Decimal(cargosParsedTotals[isAdditionalCard ? 1 : 0]?.parsedAmount ?? 0),
+          new Decimal(parsedMonthlyAmount),
         );
       } else if (pagoMatch && transactionIndex >= pagoMatch.index - 20) {
         totalPago += parsedMonthlyAmount;
@@ -1175,8 +1191,8 @@ export class CreditCardStatementService {
         this.addTransactionToCategory(
           transactionsMap,
           { ...transaction, reference: CreditCardStatementReferencesEnum.PAYMENT },
-          pagoParsedTotals[0]?.parsedAmount || 0,
-          parsedMonthlyAmount,
+          new Decimal(pagoParsedTotals[0]?.parsedAmount ?? 0),
+          new Decimal(parsedMonthlyAmount),
         );
       }
     }
@@ -1186,37 +1202,9 @@ export class CreditCardStatementService {
       totalOtrosComerciosMain,
       totalOtrosComerciosAdditional,
       totalCargosComisiones,
+      totalCargosComisionesAdditional,
       totalInstallments,
       totalPago,
-    };
-  }
-
-  private parseLiderBciInstallmentTransaction(
-    parsedOperationAmount: number,
-    installments: string | undefined,
-    monthlyAmount: string | undefined,
-    totalAmount: string | undefined,
-    totalInstallments: number,
-  ) {
-    let parsedCurrentInstallment = 1;
-    let parsedTotalInstallments = 1;
-    let parsedMonthlyAmount = parsedOperationAmount;
-    let parsedTotalAmount = parsedOperationAmount;
-
-    if (installments && monthlyAmount && totalAmount) {
-      [parsedCurrentInstallment, parsedTotalInstallments] = installments
-        .split('/')
-        .map((installment) => Number.parseInt(installment));
-      parsedMonthlyAmount = parseAmount(monthlyAmount);
-      parsedTotalAmount = parseAmount(totalAmount);
-      totalInstallments += parsedMonthlyAmount;
-    }
-    return {
-      parsedCurrentInstallment,
-      parsedTotalInstallments,
-      parsedMonthlyAmount,
-      parsedTotalAmount,
-      totalInstallments,
     };
   }
 
@@ -1235,8 +1223,8 @@ export class CreditCardStatementService {
     this.addTransactionToCategory(
       transactionsMap,
       { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
-      mainTotal?.parsedAmount || 0,
-      parsedMonthlyAmount,
+      new Decimal(mainTotal?.parsedAmount ?? 0),
+      new Decimal(parsedMonthlyAmount),
     );
   }
 
@@ -1255,8 +1243,8 @@ export class CreditCardStatementService {
     this.addTransactionToCategory(
       transactionsMap,
       { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
-      additionalTotal?.parsedAmount || 0,
-      parsedMonthlyAmount,
+      new Decimal(additionalTotal?.parsedAmount ?? 0),
+      new Decimal(parsedMonthlyAmount),
     );
   }
 
@@ -1275,8 +1263,8 @@ export class CreditCardStatementService {
     this.addTransactionToCategory(
       transactionsMap,
       { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
-      mainTotal?.parsedAmount || 0,
-      parsedMonthlyAmount,
+      new Decimal(mainTotal?.parsedAmount ?? 0),
+      new Decimal(parsedMonthlyAmount),
     );
   }
 
@@ -1295,8 +1283,8 @@ export class CreditCardStatementService {
     this.addTransactionToCategory(
       transactionsMap,
       { ...transaction, reference: CreditCardStatementReferencesEnum.TRANSACTION },
-      additionalTotal?.parsedAmount || 0,
-      parsedMonthlyAmount,
+      new Decimal(additionalTotal?.parsedAmount ?? 0),
+      new Decimal(parsedMonthlyAmount),
     );
   }
 
@@ -1405,18 +1393,23 @@ export class CreditCardStatementService {
   private addTransactionToCategory(
     transactionsMap: Map<string, TransactionCategory>,
     transaction: Transaction,
-    parsedTotalAmount: number,
-    parsedMonthlyAmount: number,
+    parsedTotalAmount: Decimal,
+    parsedMonthlyAmount: Decimal,
   ) {
     const { reference } = transaction;
     if (!transactionsMap.has(reference)) {
-      transactionsMap.set(reference, { transactions: [], parsedTotal: 0, calculatedTotal: 0 });
+      transactionsMap.set(reference, {
+        transactions: [],
+        parsedTotal: new Decimal(0),
+        calculatedTotal: new Decimal(0),
+      });
     }
     const category = transactionsMap.get(reference);
     if (category) {
       category.transactions.push(transaction);
       category.parsedTotal = parsedTotalAmount;
-      category.calculatedTotal += parsedMonthlyAmount;
+      category.calculatedTotal = category.calculatedTotal.add(parsedMonthlyAmount);
+      category.reference = reference;
     }
   }
 
@@ -1554,11 +1547,15 @@ export class CreditCardStatementService {
     return outputPath;
   }
 
-  async getLatestCreditCardStatementDate() {
+  async getLatestCreditCardStatementDateByCreditCard(creditCardId: string) {
     const latestStatement = await this.creditCardStatementRepository.find({
       select: {
         id: true,
         billingPeriodEnd: true,
+      },
+      where: {
+        creditCardId: creditCardId,
+        createdById: 'c3983079-8ad2-4057-aa26-5418e1003563',
       },
       order: {
         billingPeriodEnd: 'DESC',
@@ -1566,5 +1563,203 @@ export class CreditCardStatementService {
     });
 
     return latestStatement.length > 0 ? latestStatement[0].billingPeriodEnd : null;
+  }
+
+  async getCreditCardDebtByMonth(date: Date): Promise<CreditCardsDebt> {
+    const activeCreditCards = await this.paymentMethodService.getActiveCreditCards(
+      'c3983079-8ad2-4057-aa26-5418e1003563',
+    );
+
+    const creditCardIds = activeCreditCards.map((card) => card.id);
+
+    const latestStatementsMap = await this.findStatementsForCurrentMonth(creditCardIds);
+
+    const [billedExpensesByStatementMap, unbilledExpensesByCreditCardMap, referencesMap] = await Promise.all([
+      this.expensesService.getExpensesMapByCreditCardStatementIds(
+        Array.from(latestStatementsMap.values()).map((statement) => statement.id),
+      ),
+      this.expensesService.getUnbilledExpensesMapByCreditCardIds(creditCardIds),
+      this.getReferencesMap(),
+    ]);
+
+    const debt: CreditCardsDebt = {
+      month: date.toLocaleString('es-CL', { month: 'long' }),
+      creditCards: [],
+      totalDebt: new Decimal(0),
+    };
+
+    for (const card of activeCreditCards) {
+      const statement = latestStatementsMap.get(card.id);
+      const transactionsMap = await this.buildTransactionsMap(
+        card,
+        statement,
+        billedExpensesByStatementMap,
+        unbilledExpensesByCreditCardMap,
+        referencesMap,
+      );
+
+      let cardDebt = null;
+      cardDebt = await this.createUnbilledCardDebt(card, transactionsMap.get('unbilled') ?? new Map());
+      debt.totalDebt = debt.totalDebt.add(cardDebt.unbilledStatements?.total ?? new Decimal(0));
+      if (statement) {
+        const billedCardDebt = this.createBilledCardDebt(card, statement, transactionsMap.get('billed') ?? new Map());
+        cardDebt.billedStatements = billedCardDebt.billedStatements;
+      }
+
+      debt.creditCards.push(cardDebt);
+    }
+
+    return debt;
+  }
+
+  async findStatementsForCurrentMonth(paymentMethodsIds: string[]): Promise<Map<string, CreditCardStatement>> {
+    const now = new Date();
+    const currentMonth = now.getMonth() + 1; // 1-12
+    const currentYear = now.getFullYear();
+    const statements = await this.creditCardStatementRepository
+      .createQueryBuilder('statement')
+      .where('EXTRACT(MONTH FROM statement.billingPeriodEnd) = :month', { month: currentMonth })
+      .andWhere('EXTRACT(YEAR FROM statement.billingPeriodEnd) = :year', { year: currentYear })
+      .andWhere('statement.createdById = :userId', { userId: 'c3983079-8ad2-4057-aa26-5418e1003563' })
+      .andWhere('statement.creditCardId IN (:...paymentMethodsIds)', { paymentMethodsIds })
+      .orderBy('statement.billingPeriodEnd', 'DESC')
+      .getMany();
+    return new Map(statements.map((statement) => [statement.creditCardId, statement]));
+  }
+
+  private async getReferencesMap(): Promise<Map<string, string>> {
+    const references = await this.txHost.tx.getRepository(CreditCardStatementReference).find();
+    const referencesMap = new Map<string, string>();
+
+    for (const reference of references) {
+      referencesMap.set(reference.id, reference.name);
+    }
+
+    return referencesMap;
+  }
+
+  private async buildTransactionsMap(
+    card: PaymentMethod,
+    statement: CreditCardStatement | undefined,
+    expensesByStatementMap: Map<string, Expense[]>,
+    unbilledExpensesByStatementMap: Map<string, Expense[]>,
+    referencesMap: Map<string, string>,
+  ): Promise<Map<string, Map<string, TransactionCategory> | null>> {
+    const unbilledMap = new Map<string, TransactionCategory>();
+    this.processUnbilledExpenses(unbilledExpensesByStatementMap.get(card.id), card, unbilledMap);
+
+    const transactionsMap = new Map<string, Map<string, TransactionCategory> | null>();
+    transactionsMap.set('unbilled', unbilledMap);
+
+    if (statement) {
+      const billedMap = new Map<string, TransactionCategory>();
+      this.processStatementExpenses(
+        expensesByStatementMap.get(statement.id),
+        card,
+        statement,
+        referencesMap,
+        billedMap,
+      );
+      transactionsMap.set('billed', billedMap);
+    }
+
+    return transactionsMap;
+  }
+
+  private processStatementExpenses(
+    expenses: Expense[] | undefined,
+    card: PaymentMethod,
+    statement: CreditCardStatement | undefined,
+    referencesMap: Map<string, string>,
+    transactionsMap: Map<string, TransactionCategory>,
+  ): void {
+    if (!expenses) return;
+
+    for (const expense of expenses) {
+      const transaction = this.createTransaction(expense, card, referencesMap);
+      this.addTransactionToCategory(
+        transactionsMap,
+        transaction,
+        new Decimal(statement?.totalOperations ?? 0),
+        expense.monthlyAmount,
+      );
+    }
+  }
+
+  private processUnbilledExpenses(
+    expenses: Expense[] | undefined,
+    card: PaymentMethod,
+    transactionsMap: Map<string, TransactionCategory>,
+  ): void {
+    if (!expenses) return;
+
+    for (const expense of expenses) {
+      const transaction = this.createTransaction(expense, card, null, CreditCardStatementReferencesEnum.TRANSACTION);
+      this.addTransactionToCategory(transactionsMap, transaction, new Decimal(0), expense.monthlyAmount);
+    }
+  }
+
+  private createTransaction(
+    expense: Expense,
+    card: PaymentMethod,
+    referencesMap: Map<string, string> | null,
+    defaultReference?: string,
+  ): Transaction {
+    return {
+      date: expense.date.toISOString(),
+      referenceCode: expense.referenceCode ?? '',
+      description: expense.description,
+      operationAmount: new Decimal(expense.operationAmount),
+      totalAmount: new Decimal(expense.totalAmount),
+      currentInstallment: expense.currentInstallment,
+      totalInstallments: expense.totalInstallments,
+      monthlyAmount: new Decimal(expense.monthlyAmount),
+      reference: defaultReference ?? referencesMap?.get(expense.creditCardStatementReferenceId ?? '') ?? 'N/A',
+      creditCard: card.name,
+      location: expense.location ?? 'N/A',
+    };
+  }
+
+  private createBilledCardDebt(
+    card: PaymentMethod,
+    statement: CreditCardStatement | undefined,
+    transactionsMap: Map<string, TransactionCategory>,
+  ) {
+    return {
+      creditCard: card.name,
+      billedStatements: {
+        total: new Decimal(statement?.dueAmount ?? 0),
+        billingPeriodStart: statement?.billingPeriodStart.toLocaleDateString('es-CL') ?? '',
+        billingPeriodEnd: statement?.billingPeriodEnd.toLocaleDateString('es-CL') ?? '',
+        transactions: Array.from(transactionsMap.values()),
+      },
+      unbilledStatements: null,
+    };
+  }
+
+  private async createUnbilledCardDebt(
+    card: PaymentMethod,
+    transactionsMap: Map<string, TransactionCategory>,
+  ): Promise<CreditCardsDebt['creditCards'][0]> {
+    const lastStatementDate = await this.getLatestCreditCardStatementDateByCreditCard(card.id);
+    const unbilledPeriodStart = this.calculateUnbilledPeriodStart(lastStatementDate);
+
+    return {
+      creditCard: card.name,
+      billedStatements: null,
+      unbilledStatements: {
+        total: transactionsMap.get(CreditCardStatementReferencesEnum.TRANSACTION)?.calculatedTotal ?? new Decimal(0),
+        unbilledPeriodStart: unbilledPeriodStart?.toLocaleDateString('es-CL') ?? null,
+        transactions: Array.from(transactionsMap.values()),
+      },
+    };
+  }
+
+  private calculateUnbilledPeriodStart(lastStatementDate: Date | null): Date | null {
+    if (!lastStatementDate) return null;
+
+    const unbilledPeriodStart = new Date(lastStatementDate);
+    unbilledPeriodStart.setDate(unbilledPeriodStart.getDate() + 1);
+    return unbilledPeriodStart;
   }
 }
